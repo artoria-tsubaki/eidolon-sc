@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "Sallyn0225/eidolon-sc")
-IMAGES = ("ghcr.io/sallyn0225/eidolon-sc-backend", "ghcr.io/sallyn0225/eidolon-sc-frontend")
+IMAGES = ("ghcr.io/artoria-tsubaki/eidolon-sc-backend", "ghcr.io/artoria-tsubaki/eidolon-sc-frontend")
 
 # 单个 PR 描述和整份材料的上限；材料超了就退回只给标题
 BODY_LIMIT = 4000

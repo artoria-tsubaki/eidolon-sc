@@ -55,7 +55,7 @@ updates:
       default-days: 7
     ignore:
       # 自己的镜像，由 CI 发布
-      - dependency-name: ghcr.io/sallyn0225/*
+      - dependency-name: ghcr.io/artoria-tsubaki/*
 
   - package-ecosystem: github-actions
     directory: /

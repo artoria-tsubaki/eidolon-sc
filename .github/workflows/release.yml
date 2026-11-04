@@ -100,7 +100,7 @@ jobs:
             echo "::error::main 上 ${SHA::7} 的 CI 还没通过，等它跑完、镜像发布了再发版本"
             exit 1
           fi
-          for image in ghcr.io/sallyn0225/eidolon-sc-backend ghcr.io/sallyn0225/eidolon-sc-frontend; do
+          for image in ghcr.io/artoria-tsubaki/eidolon-sc-backend ghcr.io/artoria-tsubaki/eidolon-sc-frontend; do
             docker buildx imagetools inspect "$image:sha-${SHA::7}" > /dev/null
           done
 
@@ -144,6 +144,6 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           SHA: ${{ steps.version.outputs.sha }}
         run: |
-          for image in ghcr.io/sallyn0225/eidolon-sc-backend ghcr.io/sallyn0225/eidolon-sc-frontend; do
+          for image in ghcr.io/artoria-tsubaki/eidolon-sc-backend ghcr.io/artoria-tsubaki/eidolon-sc-frontend; do
             docker buildx imagetools create -t "$image:${VERSION#v}" -t "$image:latest" "$image:sha-${SHA::7}"
           done

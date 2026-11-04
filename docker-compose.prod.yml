@@ -29,7 +29,7 @@ services:
     logging: *logging
 
   frontend:
-    image: ghcr.io/sallyn0225/eidolon-sc-frontend:${EIDOLON_IMAGE_TAG:-main}
+    image: ghcr.io/artoria-tsubaki/eidolon-sc-frontend:${EIDOLON_IMAGE_TAG:-main}
     build: ./frontend
     network_mode: host
     environment:
@@ -44,7 +44,7 @@ services:
     logging: *logging
 
   backend:
-    image: ghcr.io/sallyn0225/eidolon-sc-backend:${EIDOLON_IMAGE_TAG:-main}
+    image: ghcr.io/artoria-tsubaki/eidolon-sc-backend:${EIDOLON_IMAGE_TAG:-main}
     build: ./backend
     network_mode: host
     env_file: .env
