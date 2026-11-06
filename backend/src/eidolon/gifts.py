@@ -23,8 +23,10 @@ or not (`reward_everyone`). The day's first visit to the bar done gives a draw c
 held to the most kept (`reward_draw`).
 
 An admin may give every user there is a reset card at once (`grant_reset_cards`), banned
-ones and admins too, but no one user anything on their own. Each grant is kept, when and
-how many, saying nothing of who granted it or to whom: that too is no one's.
+ones and admins too. Each global grant keeps only when and how many. Individual grants
+(`grant_user_resources`) add gifts, reset cards and uncapped draw chances, with an optional
+reason and a retry-safe receipt. Their records belong to the recipient; deleting an actor
+unlinks their identity. Reading admin resources never accrues daily chances or reads affinity.
 
 Each draw uses a chance and gives a reset card or a gift, as likely as `affinity.DRAW_ODDS`
 says, any of the rarity's gifts not retired as likely as another: nothing is guaranteed,
@@ -33,6 +35,7 @@ them retired since or not. The numbers come from the random source the backend i
 with (`randomness.Random`). Drawing calls no model and leaves no activity record.
 """
 
+import json
 import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
@@ -57,7 +60,7 @@ from eidolon.data_access import Database
 from eidolon.gift_catalog import Gift
 from eidolon.producer import effective_timezone
 from eidolon.randomness import Random
-from eidolon.store import add_gift, read_profile
+from eidolon.store import NotFound, add_gift, read_profile
 
 _SCHEMA = """
 -- One row per user given any draw chances: how many they have, the day they were last given
@@ -97,7 +100,21 @@ CREATE TABLE IF NOT EXISTS gift_rewards (
     rewarded_at TEXT NOT NULL,
     PRIMARY KEY (user_id, key)
 );
+CREATE TABLE IF NOT EXISTS user_gift_grants (
+    request_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    granted_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    resources TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS user_gift_grants_history
+    ON user_gift_grants(user_id, granted_at DESC);
 """
+
+
+class GiftGrantConflict(Exception):
+    """A request identifier was already used for a different grant."""
 
 RESET_CARD = "reset_card"
 """What a draw gives that is not a gift."""
@@ -469,6 +486,93 @@ class Gifts:
         """The latest time every user was given a reset card; None if never."""
         return await self._db.read(_last_grant)
 
+    async def admin_resources(self, user_id: str) -> dict:
+        """Only stored resources: no daily accrual, affinity, or achievements."""
+        return await self._db.read(self._admin_resources, user_id)
+
+    def _admin_resources(self, db: sqlite3.Connection, user_id: str) -> dict:
+        if db.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+            raise NotFound(user_id)
+        row = db.execute(
+            "SELECT draws, reset_cards FROM gift_balances WHERE user_id = ?", (user_id,),
+        ).fetchone()
+        held = dict(db.execute(
+            "SELECT gift_id, count FROM gift_backpacks WHERE user_id = ? AND count > 0",
+            (user_id,),
+        ))
+        return {
+            "draws": row[0] if row else 0,
+            "reset_cards": row[1] if row else 0,
+            "backpack": [{"gift_id": g, "count": held[g]} for g in self._catalog if g in held],
+        }
+
+    async def user_grants(self, user_id: str, offset: int) -> dict:
+        def read(db: sqlite3.Connection) -> dict:
+            self._admin_resources(db, user_id)
+            rows = db.execute(
+                "SELECT g.request_id, g.actor_id, u.name, g.granted_at, g.payload"
+                " FROM user_gift_grants g LEFT JOIN users u ON u.id = g.actor_id"
+                " WHERE g.user_id = ? ORDER BY g.granted_at DESC, g.rowid DESC LIMIT 20 OFFSET ?",
+                (user_id, offset),
+            ).fetchall()
+            total = db.execute(
+                "SELECT count(*) FROM user_gift_grants WHERE user_id = ?", (user_id,),
+            ).fetchone()[0]
+            return {"grants": [_shown_user_grant(row) for row in rows], "total": total}
+        return await self._db.read(read)
+
+    async def grant_user_resources(
+        self, user_id: str, actor_id: str, request_id: str, payload: dict,
+    ) -> dict:
+        """Accrue daily chances, add resources and record a retry-safe grant atomically."""
+        await self.notice()
+        canonical = json.dumps(payload | {
+            "gifts": sorted(payload["gifts"], key=lambda g: g["gift_id"]),
+        }, sort_keys=True)
+
+        def grant(db: sqlite3.Connection) -> dict:
+            self._admin_resources(db, user_id)
+            previous = db.execute(
+                "SELECT user_id, actor_id, payload, resources FROM user_gift_grants"
+                " WHERE request_id = ?", (request_id,),
+            ).fetchone()
+            if previous:
+                if previous[:3] != (user_id, actor_id, canonical):
+                    raise GiftGrantConflict("这个请求标识已用于另一笔发放")
+                resources = json.loads(previous[3])
+            else:
+                if not self._is_open():
+                    raise GiftsClosed()
+                for item in payload["gifts"]:
+                    gift = self._catalog.get(item["gift_id"])
+                    if gift is None or gift.retired:
+                        raise ValueError("只能发放目录中未退役的礼物")
+                now = self._clock()
+                _give(db, user_id, day_of(now))
+                for item in payload["gifts"]:
+                    db.execute(
+                        "INSERT INTO gift_backpacks (user_id, gift_id, count) VALUES (?, ?, ?)"
+                        " ON CONFLICT (user_id, gift_id) DO UPDATE SET count = count + excluded.count",
+                        (user_id, item["gift_id"], item["count"]),
+                    )
+                db.execute(
+                    "UPDATE gift_balances SET draws = draws + ?, reset_cards = reset_cards + ?"
+                    " WHERE user_id = ?", (payload["draws"], payload["reset_cards"], user_id),
+                )
+                resources = self._admin_resources(db, user_id)
+                db.execute(
+                    "INSERT INTO user_gift_grants VALUES (?, ?, ?, ?, ?, ?)",
+                    (request_id, user_id, actor_id, now.isoformat(), canonical, json.dumps(resources)),
+                )
+            row = db.execute(
+                "SELECT g.request_id, g.actor_id, u.name, g.granted_at, g.payload"
+                " FROM user_gift_grants g LEFT JOIN users u ON u.id = g.actor_id"
+                " WHERE g.request_id = ?", (request_id,),
+            ).fetchone()
+            return {"grant": _shown_user_grant(row), "resources": resources}
+
+        return await self._db.write(grant)
+
     def _notice(self, db: sqlite3.Connection, is_open: bool) -> None:
         """`notice`, gifts being open now or not as `is_open` says, through `db`."""
         if _noticed(db, is_open):
@@ -613,6 +717,14 @@ def _due(db: sqlite3.Connection, user_id: str, today: date) -> bool:
         "SELECT given_on FROM gift_balances WHERE user_id = ?", (user_id,)
     ).fetchone()
     return row is None or today > date.fromisoformat(row[0])
+
+
+def _shown_user_grant(row: tuple) -> dict:
+    request_id, actor_id, name, granted_at, payload = row
+    return json.loads(payload) | {
+        "request_id": request_id, "granted_at": granted_at,
+        "actor": {"id": actor_id, "name": name} if actor_id else None,
+    }
 
 
 def _give(db: sqlite3.Connection, user_id: str, today: date) -> None:

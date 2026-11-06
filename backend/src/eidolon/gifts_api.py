@@ -6,19 +6,24 @@ Her own achievements (GLOSSARY.md「成就」) are at `/api/characters/{id}/achi
 of all the characters together with what the user has.
 None says which gifts a character likes: the gifts page gives none of that away. Admins give every user a reset card at
 `/api/admin/gifts/reset-card-grants`, which answers 404 to anyone else as the rest of the
-admin console does. Gifts not open, drawing, giving, using a reset card and granting them
+admin console does. Individual resources and retry-safe grant receipts are at
+`/api/admin/users/{id}/gifts` and `/api/admin/users/{id}/gift-grants`, without affinity.
+Gifts not open, drawing, giving, using a reset card and granting them
 are refused with 409 and `gifts_closed`, told apart from a cooldown's 409, so the page shows
 them closed."""
 
 from dataclasses import replace
+from typing import Annotated
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eidolon.admin_api import Admin
 from eidolon.assembly import Backend
 from eidolon.gifts import (
+    GiftGrantConflict,
     GiftsClosed,
     NoDraws,
     NoneLeft,
@@ -27,6 +32,31 @@ from eidolon.gifts import (
     NoSuchCharacter,
 )
 from eidolon.sessions import DeviceTimezone, UserId
+from eidolon.store import NotFound
+
+
+class GrantGiftInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    gift_id: str = Field(min_length=1, max_length=100)
+    count: int = Field(ge=1, le=999, strict=True)
+
+
+class UserGiftGrantInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    gifts: list[GrantGiftInput] = Field(default_factory=list, max_length=1000)
+    reset_cards: int = Field(0, ge=0, le=999, strict=True)
+    draws: int = Field(0, ge=0, le=999, strict=True)
+    note: str = Field("", max_length=500)
+
+    @model_validator(mode="after")
+    def valid_grant(self) -> "UserGiftGrantInput":
+        if len({g.gift_id for g in self.gifts}) != len(self.gifts):
+            raise ValueError("同一种礼物只能选择一次")
+        if not self.gifts and not self.reset_cards and not self.draws:
+            raise ValueError("至少添加一项资源")
+        self.note = self.note.strip()
+        return self
 
 
 class DrawInput(BaseModel):
@@ -125,3 +155,36 @@ def add_gift_routes(app: FastAPI, backend: Backend) -> None:
     async def grant_reset_cards(_: Admin) -> dict:
         """Give every user there is now a reset card: when, and how many were given."""
         return (await gifts.grant_reset_cards()).shown()
+
+    @app.get("/api/admin/users/{user_id}/gifts")
+    async def read_user_resources(user_id: str, _: Admin) -> dict:
+        try:
+            resources = await gifts.admin_resources(user_id)
+        except NotFound:
+            raise HTTPException(404, "没有这位用户") from None
+        return resources | {
+            "open": backend.config.affinity_on,
+            "catalog": [g.described() for g in catalog.values()],
+        }
+
+    @app.get("/api/admin/users/{user_id}/gift-grants")
+    async def read_user_grants(
+        user_id: str, _: Admin, offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict:
+        try:
+            return await gifts.user_grants(user_id, offset)
+        except NotFound:
+            raise HTTPException(404, "没有这位用户") from None
+
+    @app.post("/api/admin/users/{user_id}/gift-grants")
+    async def grant_user_resources(user_id: str, body: UserGiftGrantInput, admin: Admin) -> dict:
+        try:
+            return await gifts.grant_user_resources(
+                user_id, admin.id, str(body.request_id), body.model_dump(exclude={"request_id"}),
+            )
+        except NotFound:
+            raise HTTPException(404, "没有这位用户") from None
+        except GiftGrantConflict as e:
+            raise HTTPException(409, str(e)) from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None

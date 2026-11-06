@@ -12,6 +12,7 @@ import { Timestamp } from "@/components/app/admin/Timestamp";
 import { AdminBadge, BanStatus, UserLimits } from "@/components/AdminUserList";
 import { BanUserDialog } from "@/components/BanUserDialog";
 import { UserLimitsDialog } from "@/components/UserLimitsDialog";
+import { UserGiftResources } from "@/components/admin/UserGiftResources";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -256,6 +257,7 @@ export function AdminUserDetails({ id }: { id: string }) {
       </Card>
 
       <AdminTrail value={user.name} />
+      <UserGiftResources key={id} id={id} name={user.name} />
       <RecentUsage usage={user.usage} />
 
       {action !== null && (

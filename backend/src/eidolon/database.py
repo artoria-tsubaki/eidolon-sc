@@ -40,6 +40,7 @@ USER_DATA = [
     ("gift_balances", "user_id = ?"),
     ("gift_backpacks", "user_id = ?"),
     ("gift_rewards", "user_id = ?"),
+    ("user_gift_grants", "user_id = ?"),
     ("achievement_progress", "user_id = ?"),
     ("achievement_stages", "user_id = ?"),
     ("usage", "user_id = ?"),
