@@ -35,6 +35,18 @@ Streamed = str | ToolCall | Reasoning
 
 
 @dataclass(frozen=True)
+class ImageContent:
+    """Validated image bytes, encoded for a provider without a fetchable URL."""
+
+    media_type: str
+    data: str
+
+    @property
+    def data_url(self) -> str:
+        return f"data:{self.media_type};base64,{self.data}"
+
+
+@dataclass(frozen=True)
 class ChatMessage:
     role: Literal["system", "user", "assistant", "tool"]
     content: str
@@ -45,6 +57,7 @@ class ChatMessage:
     reasoning: tuple[Reasoning, ...] = ()
     """What the model thought as it made an assistant message's calls: kept for the rest
     of the turn alone, never recorded."""
+    images: tuple[ImageContent, ...] = ()
     cache_breakpoint: bool = False
     """The prompt up to the end of this message is what many requests open with, worth a
     service caching: an adapter whose protocol caches only where told to says so here."""

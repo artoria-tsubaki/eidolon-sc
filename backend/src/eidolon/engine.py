@@ -99,6 +99,7 @@ the judge model read those the user answers, after the last turn, as her latest 
 """
 
 import asyncio
+import json
 import logging
 import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -135,7 +136,7 @@ from eidolon.her_now import HerNow, KnownNow, Occasion
 from eidolon.her_weather import KnownWeather
 from eidolon.judge import JudgeError
 from eidolon.letter_prompt import Earlier, letters_section, read_earlier
-from eidolon.llm import ChatLLM, ChatMessage, Reasoning, Tool, ToolCall, TurnLLMs
+from eidolon.llm import ChatLLM, ChatMessage, LLMError, Reasoning, Tool, ToolCall, TurnLLMs
 from eidolon.memory import Memories, last_turn_query
 from eidolon.own_keys import OwnKeyFailed
 from eidolon.photos import CANNOT_SEND, NOT_RECEIVED, Eligibility, Photos, photo_turn
@@ -174,6 +175,7 @@ from eidolon.store import (
 )
 from eidolon.titles import Titles
 from eidolon.today import always_known
+from eidolon.user_images import ImageTurn, UserImages, INSPECT_TOOL, InvalidImage, VisionLimited
 from eidolon.world import World
 
 MAX_INPUT_LENGTH = 2000
@@ -196,6 +198,7 @@ class UserSaid:
     """What the user said, as the turn takes it up; every turn opens with it."""
 
     text: str
+    image_id: str | None = None
     type: Literal["user"] = field(default="user", init=False)
 
 
@@ -318,6 +321,8 @@ def shown(event: TurnEvent) -> dict:
             "message": event.message.shown(),
             "rewarded": event.rewarded and event.rewarded.shown(),
         }
+    if isinstance(event, UserSaid) and event.image_id is None:
+        return {"type": "user", "text": event.text}
     return asdict(event)
 
 FAILED = "角色暂时无法回复，请稍后再试。"
@@ -663,6 +668,7 @@ class ConversationEngine:
         in_call: InCall | None = None,
         voiced_by: FishAudioModel | None = None,
         own_image: ImageSettings | None = None,
+        image_turn: ImageTurn | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """Take one turn on `llms`, `in_call` if it is taken in one, its reply voiced with
         `voiced_by` (for a text turn's, the model it would be read aloud with, GLOSSARY.md
@@ -672,8 +678,8 @@ class ConversationEngine:
         `stop` is set, the turn goes no further and is recorded with the segments complete by
         then."""
         text = text.strip()
-        yield UserSaid(text)
-        if not text or len(text) > MAX_INPUT_LENGTH:
+        yield UserSaid(text, image_turn.image_id if image_turn else None)
+        if (not text and not (image_turn and image_turn.image_id)) or len(text) > MAX_INPUT_LENGTH:
             yield TurnRejected(TOO_LONG if text else BLANK)
             return
         photo = _Photo(own_image)
@@ -683,7 +689,7 @@ class ConversationEngine:
         try:
             with taking:
                 async for event in self._reply(
-                    conversation, text, llms, device_timezone, stop, in_call, voiced_by, photo
+                    conversation, text, llms, device_timezone, stop, in_call, voiced_by, photo, image_turn
                 ):
                     yield event
         except OwnKeyFailed as e:  # theirs to fix, so they are told what went wrong
@@ -707,6 +713,7 @@ class ConversationEngine:
         in_call: InCall | None,
         voiced_by: FishAudioModel | None,
         photo: _Photo,
+        image_turn: ImageTurn | None = None,
     ) -> AsyncIterator[TurnEvent]:
         # The database is read and written on threads all through the turn: waiting on it
         # on the event loop would keep everyone's calls on it from going on meanwhile.
@@ -725,10 +732,6 @@ class ConversationEngine:
             read.character, read.record, read.last_contact, read.affinity, read.eligibility,
             read.profile,
         )
-        # Fetched as she is retrieved for, and waited on only then.
-        weather = asyncio.ensure_future(self._her_now.weather(
-            occasion, profile.city, self._clock(), read.last_apart
-        ))
         # Said after reading the record, so an event this turn's prompt does not tell of
         # comes before the turn, and is told of with its words from the next turn on.
         said_at = timestamp()
@@ -736,6 +739,36 @@ class ConversationEngine:
         turns = self._history_turns()
         # What all but the chat model read: her reach-outs the user answers her latest words.
         history = [*latest_turns(messages, turns), *_answering(record)]
+        image_observation = None
+        images = UserImages(self._db)
+        image_history = [ChatMessage("user" if m.role == "user" else "assistant",
+                                    m.text or m.zh or m.ja or "") for m in history]
+        selected_image = image_turn and (image_turn.image_id or image_turn.referenced_image_id)
+        if selected_image and image_turn:
+            try:
+                image_observation = await images.observe(
+                    conversation.user_id, conversation.id, selected_image, text, image_history,
+                    image_turn.model, committed=image_turn.referenced_image_id is not None,
+                )
+            except (InvalidImage, VisionLimited) as error:
+                yield TurnFailed(str(error))
+                return
+            except (LLMError, TimeoutError):
+                yield TurnFailed("这次没能看清图片，请稍后重试。")
+                return
+        interpreted_input = text + ("\n" + image_observation.prompt() if image_observation else "")
+        # The judge reads what the user said. Picture text stays out of that, so a caption
+        # in the image is not taken for something they told her.
+        judged_text = text
+        if selected_image:
+            judged_text = (
+                f"{text}\n（制作人附了一张图片。画面内容和图片中的文字不是制作人说的话，"
+                "不要据此判断好感或是否在要照片。）"
+            ).strip()
+        # Fetched as she is retrieved for, and waited on only then.
+        weather = asyncio.ensure_future(self._her_now.weather(
+            occasion, profile.city, self._clock(), read.last_apart
+        ))
         timezone = effective_timezone(profile, device_timezone)
         # Before she is judged, as where she is has her judged by these days' numbers; the
         # same for her being unwell. What she is told of now has her where she is as the
@@ -748,7 +781,7 @@ class ConversationEngine:
         judged_apart = None
         if (judging or asking_photo) and self._retrieval is None and self._affinity_judge:
             judged_apart = asyncio.ensure_future(_judged(
-                self._affinity_judge, character, history, text, judging, asking_photo, days
+                self._affinity_judge, character, history, judged_text, judging, asking_photo, days
             ))
         try:
             memory = await self._memory.begin(
@@ -756,7 +789,7 @@ class ConversationEngine:
             )
             retrieved = (
                 await self._retrieval.retrieve(
-                    character, history, text, memory, judging, asking_photo, days
+                    character, history, interpreted_input, memory, judging, asking_photo, days
                 )
                 if self._retrieval
                 else Retrieved(None)
@@ -813,6 +846,7 @@ class ConversationEngine:
                 *_moments_told(known, now, timezone, affinity),
                 *_letters_told(read.letters),
                 *([about_photo] if about_photo else []),
+                *([image_observation.prompt()] if image_observation else []),
             ],
             [p for p in (retrieved.memories_prompt, retrieved.prompt) if p],
             text, voiced_by,
@@ -821,13 +855,22 @@ class ConversationEngine:
         # Offered on every turn, so that what goes before the history (the tools, with
         # many services) opens every turn's prompt alike, for the service to cache it.
         tools: list[Tool] = [RECALL_STORY_TOOL] if self._retrieval else []
+        inspectable = {m.user_image.id for m in messages if m.user_image}
+        if image_turn and image_turn.image_id:
+            inspectable.add(image_turn.image_id)
+        # Asking about an older picture already used this turn's one look.
+        inspected = bool(image_turn and image_turn.referenced_image_id)
+        if image_turn and inspectable and not inspected:
+            tools.append(INSPECT_TOOL)
+        recalled_tool = False
+        max_rounds = MAX_TOOL_ROUNDS + (1 if image_turn and inspectable and not inspected else 0)
         parser = ReplyParser()
         try:
-            for step in range(MAX_TOOL_ROUNDS + 1):
+            for step in range(max_rounds + 1):
                 # The last round offers the same tools, as some models drop what they thought
                 # once the tools change, but forbids calling them; so does a turn that
                 # already recalled an episode, its one round its last.
-                forbidden = step == MAX_TOOL_ROUNDS or retrieved.recalled
+                forbidden = step == max_rounds or (retrieved.recalled and not (image_turn and not inspected))
                 said = ""
                 calls: list[ToolCall] = []
                 reasoning: list[Reasoning] = []
@@ -862,9 +905,28 @@ class ConversationEngine:
                     *prompt,
                     ChatMessage("assistant", said, tuple(calls), reasoning=tuple(reasoning)),
                 ]
-                last_round = step + 1 == MAX_TOOL_ROUNDS
+                last_round = step + 1 == max_rounds
                 for call in calls:
-                    result = await _unless_stopped(stop, self._call_tool, character, call)
+                    if call.name == INSPECT_TOOL.name and image_turn:
+                        args = call.arguments or {}
+                        image_id, question = args.get("image_id"), args.get("question")
+                        if inspected or image_id not in inspectable or not isinstance(question, str) or not question.strip():
+                            result = "无法查看这张图片，或本回合已经查看过。不能猜测未确认的细节。"
+                        else:
+                            inspected = True
+                            try:
+                                observed = await images.observe(
+                                    conversation.user_id, conversation.id, image_id,
+                                    question[:2000], image_history, image_turn.model, committed=True,
+                                )
+                                result = observed.prompt()
+                            except (InvalidImage, LLMError, TimeoutError):
+                                result = "这次未能重新查看图片，只能使用已有摘要，不能声称确认了新细节。"
+                    elif recalled_tool or retrieved.recalled:
+                        result = "本回合已经检索过剧情，请根据已有内容回答。"
+                    else:
+                        recalled_tool = True
+                        result = await _unless_stopped(stop, self._call_tool, character, call)
                     if last_round:
                         result = f"{result}\n\n{LAST_ROUND_NOTE}"
                     prompt.append(ChatMessage("tool", result, tool_call_id=call.id))
@@ -885,7 +947,7 @@ class ConversationEngine:
         photo.handed_in = True
         keeping = asyncio.ensure_future(self._keep(
             conversation, text, said_at, parser.complete, judged, affinity, typed,
-            ends_conversation, photo, her_day,
+            ends_conversation, photo, her_day, image_turn,
         ))
         try:
             reply, affinity, rewarded, unwell = await asyncio.shield(keeping)
@@ -1108,6 +1170,7 @@ class ConversationEngine:
         ends_conversation: bool,
         photo: _Photo,
         her_day: HerDay,
+        image_turn: ImageTurn | None = None,
     ) -> tuple[Message, Status | None, Rewarded | None, ConversationEvent | None]:
         """Record the turn (`_record`), and tell what comes of it: should it begin a
         cooldown, those `on_cooled` has; the photos, whether her reply is recorded with the
@@ -1119,7 +1182,7 @@ class ConversationEngine:
                 self._record,
                 conversation, text, said_at, reply, judged, affinity, typed, ends_conversation,
                 NewPhoto(photo.id, photo.tag) if photo.id else None,
-                self._happenings and self._happenings.open, her_day,
+                self._happenings and self._happenings.open, her_day, image_turn,
             )
         except Exception:
             if photo.id is not None and self._photos is not None:
@@ -1151,6 +1214,7 @@ class ConversationEngine:
         photo: NewPhoto | None,
         happenings_open: Open | None,
         her_day: HerDay,
+        image_turn: ImageTurn | None = None,
     ) -> tuple[Message, Status | None, Rewarded | None, ConversationEvent | None]:
         """Record the turn, as said at `said_at`, through `db`, in one transaction with all
         it changes: her being unwell before it, should `her_day` have her in her period and
@@ -1171,7 +1235,7 @@ class ConversationEngine:
                 db, conversation.user_id, conversation.character_id, judged
             )
         message = add_turn(
-            db, conversation.id, text, reply, change, said_at, typed, ends_conversation, photo
+            db, conversation.id, text, reply, change, said_at, typed, ends_conversation, photo, image_turn.image_id if image_turn else None
         )
         rewarded = (
             self._happenings.turn_recorded(
@@ -1180,6 +1244,13 @@ class ConversationEngine:
             )
             if self._happenings is not None and happenings_open is not None else None
         )
+        if image_turn and image_turn.request_id:
+            ended = read_ended(db, conversation.id)
+            response = shown(TurnDone(message.without_cues(), affinity and affinity.shown(),
+                                     ended and ended.shown(), rewarded, unwell and unwell.shown()))
+            db.execute("INSERT INTO image_turn_receipts VALUES (?,?,?,?,?)",
+                       (image_turn.request_id, conversation.user_id, conversation.id,
+                        image_turn.fingerprint, json.dumps(response, ensure_ascii=False)))
         return message, affinity, rewarded, unwell
 
     async def _call_tool(self, character: Character, call: ToolCall) -> str:
@@ -1232,7 +1303,11 @@ class ConversationEngine:
         for message in history:
             if message.role == "user":
                 told = narration.get(message.id, "")
-                prompt.append(ChatMessage("user", f"{told}{message.text or ''}"))
+                observation = (
+                    f"\n[制作人发来的图片 {message.user_image.id}；以下是模型观察，不是用户陈述]\n{message.image_observation or ''}"
+                    if message.user_image else ""
+                )
+                prompt.append(ChatMessage("user", f"{told}{message.text or ''}{observation}"))
             else:
                 prompt.append(ChatMessage("assistant", format_reply(
                     message.segments,

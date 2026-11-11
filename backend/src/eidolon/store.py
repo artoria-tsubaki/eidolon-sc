@@ -3,6 +3,7 @@ their messages and events, her reach-outs, the photos she sent with her replies,
 calls in them;
 memories are kept by `memory`, recent usage by `usage`."""
 
+import base64
 import hashlib
 import json
 import secrets
@@ -26,6 +27,7 @@ from eidolon.database import (
 from eidolon.delivery_cues import without_cues
 from eidolon.producer import Birthday, City, ProducerProfile
 from eidolon.reply_format import Segment
+from eidolon.user_images import SCHEMA as USER_IMAGES_SCHEMA, UserImage, bind as bind_user_image
 
 Admit = Callable[[sqlite3.Connection, str], None]
 """Run in the write that makes a new user, given their id, to let them sign up: whatever it
@@ -304,6 +306,8 @@ class Message:
     segments: list[Segment] = field(default_factory=list)
     affinity: Change | None = None
     photo: Photo | None = None
+    user_image: UserImage | None = None
+    image_observation: str | None = None
 
     @property
     def photo_sent(self) -> bool:
@@ -335,6 +339,9 @@ class Message:
         status and reason if it has one, no key for it if not."""
         shown = asdict(self.without_cues())
         del shown["photo"]
+        del shown["image_observation"]
+        if self.user_image is None:
+            del shown["user_image"]
         return shown | ({"photo": self.photo.shown()} if self.photo else {})
 
 
@@ -496,6 +503,8 @@ class KeptMessage:
     hurt: float | None
     out_of_line: bool | None
     photo: KeptPhoto | None = None
+    user_image: str | None = None
+    image_observation: str | None = None
     """The photo she sent with the reply, if any."""
 
 
@@ -875,8 +884,11 @@ _MESSAGE_COLUMNS = (
 )
 _MESSAGE_WITH_PHOTO = (
     f"{_MESSAGE_COLUMNS}, p.id AS photo_id, p.status AS photo_status,"
-    " p.reason AS photo_reason, p.tag AS photo_tag"
+    " p.reason AS photo_reason, p.tag AS photo_tag,"
+    " ui.id AS user_image_id, ui.width AS image_width, ui.height AS image_height,"
+    " ui.observation AS image_observation"
     " FROM messages m LEFT JOIN photos p ON p.message_id = m.id"
+    " LEFT JOIN user_images ui ON ui.message_id = m.id"
 )
 """A message with its photo, if any, but not its picture (`_message_with_photo`)."""
 _EVENT_COLUMNS = "id, kind, created_at, affinity, gift_id, liked, first_day, days_ago"
@@ -885,6 +897,8 @@ _REACH_OUT_COLUMNS = "id, ja, zh, segments, created_at"
 def _open(db: sqlite3.Connection) -> None:
     """Make the store's tables, and bring those an older version made up to date."""
     db.executescript(_SCHEMA)
+    db.executescript(USER_IMAGES_SCHEMA)
+    _add_missing_columns(db, "user_images", ("observation_key",), "TEXT")
     columns = _columns(db, "users")
     if "name" not in columns:
         # Before access keys, users had no name; the one default user keeps its id as name.
@@ -1304,12 +1318,16 @@ def read_whole_conversations(db: sqlite3.Connection, user_id: str) -> list[Whole
                         m["photo_id"], m["photo_tag"], m["photo_status"],
                         m["photo_reason"], m["photo_created_at"], m["photo_updated_at"],
                     ),
+                    base64.b64encode(m["user_image_pixels"]).decode() if m["user_image_pixels"] else None,
+                    m["user_image_observation"],
                 )
                 for m in named.execute(
                     "SELECT m.*, p.id AS photo_id, p.tag AS photo_tag,"
                     " p.status AS photo_status, p.reason AS photo_reason,"
-                    " p.created_at AS photo_created_at, p.updated_at AS photo_updated_at"
+                    " p.created_at AS photo_created_at, p.updated_at AS photo_updated_at,"
+                    " ui.image AS user_image_pixels, ui.observation AS user_image_observation"
                     " FROM messages m LEFT JOIN photos p ON p.message_id = m.id"
+    " LEFT JOIN user_images ui ON ui.message_id = m.id"
                     " WHERE m.conversation_id = ? ORDER BY m.id",
                     (c["id"],),
                 ).fetchall()
@@ -1478,6 +1496,7 @@ def add_turn(
     typed: Typed | None = None,
     ends: bool = False,
     photo: NewPhoto | None = None,
+    user_image_id: str | None = None,
 ) -> Message:
     """Record the user's input, said at `said_at` (as `timestamp` gives it; now by
     default), and the character's reply together, through `db`, in the transaction the
@@ -1489,7 +1508,9 @@ def add_turn(
     conversation she has ended already, nothing is recorded: `ConversationEnded`."""
     if read_ended(db, conversation_id) is not None:
         raise ConversationEnded()
-    _insert_message(db, conversation_id, "user", text=text, created_at=said_at, typed=typed)
+    user_message = _insert_message(db, conversation_id, "user", text=text, created_at=said_at, typed=typed)
+    if user_image_id is not None:
+        bind_user_image(db, user_image_id, conversation_id, user_message.id)
     replied = _insert_message(db, conversation_id, "character", segments=reply, affinity=affinity)
     if photo is not None:
         now = _now()
@@ -1971,6 +1992,12 @@ def add_carried_conversation(
                 None if m.out_of_line is None else int(m.out_of_line),
             ),
         ).lastrowid
+        if m.user_image is not None:
+            from eidolon.user_images import normalize
+            import time
+            pixels, width, height = normalize(base64.b64decode(m.user_image, validate=True))
+            db.execute("INSERT INTO user_images (id,user_id,conversation_id,message_id,image,width,height,created_at,observation) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (uuid.uuid4().hex, user_id, conversation_id, message_id, pixels, width, height, time.time(), m.image_observation))
         if (photo := m.photo) is not None:
             db.execute(
                 "INSERT INTO photos (id, conversation_id, message_id, tag, status, reason,"
@@ -2031,9 +2058,14 @@ def _message(row: sqlite3.Row) -> Message:
 
 
 def _message_with_photo(row: sqlite3.Row) -> Message:
+    message = _message(row)
+    if "user_image_id" in row.keys() and row["user_image_id"] is not None:
+        message = replace(message, user_image=UserImage(
+            row["user_image_id"], row["image_width"], row["image_height"]
+        ), image_observation=row["image_observation"])
     if row["photo_id"] is None:
-        return _message(row)
-    return replace(_message(row), photo=Photo(
+        return message
+    return replace(message, photo=Photo(
         row["photo_id"], row["photo_status"], row["photo_reason"], row["photo_tag"]
     ))
 

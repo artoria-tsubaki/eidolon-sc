@@ -221,6 +221,7 @@ class OwnKeysInput(BaseModel):
     stt: OwnSTTInput | None = None
     memory_llm: OwnLLMInput | None = None
     image: OwnImageInput | None = None
+    vision_llm: OwnLLMInput | None = None
 
     @model_validator(mode="after")
     def _memory_llm_with_llm(self) -> "OwnKeysInput":
@@ -494,6 +495,22 @@ def add_account_routes(app: FastAPI, backend: Backend) -> None:
         with throttle.asking(user_id):
             await own_keys.check_llm(own)
         return {"base_url": own.text.base_url, "model": own.text.model}
+
+    @app.post("/api/account/keys/vision-llm/check")
+    async def check_own_vision(body: OwnLLMInput, user_id: UserId) -> dict:
+        from eidolon.user_images import check_vision
+        from eidolon.llm import LLMError
+        from eidolon.own_keys import OwnKeyFailed
+        own = body.settings()
+        with throttle.asking(user_id):
+            model = own_keys.vision_model(own, own=True)
+            try:
+                await check_vision(model)
+            except (LLMError, OwnKeyFailed, TimeoutError):
+                raise HTTPException(422, "图片理解模型验证失败，请检查密钥、地址和模型的看图能力") from None
+            finally:
+                await model.aclose()
+        return {"base_url": own.base_url, "model": own.model}
 
     @app.post("/api/account/keys/memory-llm/check")
     async def check_own_memory_llm(body: OwnLLMInput, user_id: UserId) -> dict:

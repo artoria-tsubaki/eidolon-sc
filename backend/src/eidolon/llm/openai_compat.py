@@ -167,7 +167,12 @@ def _message(message: ChatMessage) -> dict[str, Any]:
             assistant["reasoning_content"] = reasoning
         assistant["tool_calls"] = [_call(call, extras.get(call.id)) for call in message.tool_calls]
         return assistant
-    return {"role": message.role, "content": message.content}
+    return {"role": message.role, "content": (
+        [{"type": "text", "text": message.content}] + [
+            {"type": "image_url", "image_url": {"url": image.data_url}}
+            for image in message.images
+        ] if message.images else message.content
+    )}
 
 
 def _call(call: ToolCall, extra: dict[str, Any] | None) -> dict[str, Any]:

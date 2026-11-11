@@ -17,7 +17,10 @@ export function proxy(request: NextRequest) {
   const response = to ? NextResponse.redirect(new URL(to, request.url)) : NextResponse.next();
   response.headers.set(
     "Content-Security-Policy",
-    contentSecurityPolicy(process.env.EIDOLON_STAND_ASSETS_URL),
+    contentSecurityPolicy(
+      process.env.EIDOLON_STAND_ASSETS_URL,
+      process.env.NODE_ENV === "development",
+    ),
   );
   return response;
 }

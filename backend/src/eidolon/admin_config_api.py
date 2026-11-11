@@ -33,6 +33,7 @@ from eidolon.live_config import (
     JUDGE_THRESHOLDS,
     LIMITS,
     MEMORY_LLM,
+    VISION_LLM,
     LETTERS,
     MOMENTS,
     PROXY,
@@ -80,6 +81,12 @@ class LLMInput(BaseModel):
 
     _trim = field_validator("model")(_trimmed)
     _base_url = field_validator("base_url")(checked_base_url)
+
+
+class VisionLLMInput(LLMInput):
+    hourly_limit: int = Field(20, ge=0, le=10000)
+    concurrency: int = Field(2, ge=1, le=20)
+    timeout_seconds: int = Field(60, ge=5, le=60)
 
 
 class LLMListInput(BaseModel):
@@ -298,6 +305,7 @@ class RegistrationInput(BaseModel):
 INPUTS: dict[str, type[BaseModel]] = {
     CHAT_LLM: ChatLLMInput,
     MEMORY_LLM: LLMInput,
+    VISION_LLM: VisionLLMInput,
     TTS: TTSInput,
     STT: STTInput,
     IMAGE: ImageInput,

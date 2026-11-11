@@ -336,3 +336,15 @@ describe("own keys changing", () => {
     expect(told).toHaveBeenCalledTimes(4);
   });
 });
+
+it("keeps an independent vision model without a chat key", () => {
+  storage();
+  keepOwnKey("u1", "vision_llm", LLM);
+  expect(localOwnKeys("u1")).toEqual({ vision_llm: LLM });
+  expect(turnOwnKeys("u1")).toEqual({ vision_llm: LLM });
+  expect(localOwnKeys("u2")).toEqual({});
+  forgetOwnKey("u1", "llm");
+  expect(turnOwnKeys("u1")).toEqual({ vision_llm: LLM });
+  forgetOwnKey("u1", "vision_llm");
+  expect(turnOwnKeys("u1")).toBeUndefined();
+});

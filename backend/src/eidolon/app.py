@@ -1,6 +1,7 @@
 """The backend's HTTP API."""
 
 import asyncio
+import hashlib
 import json
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -27,8 +28,9 @@ from eidolon.call import (
 )
 from eidolon.characters import Character, ScriptedLine, in_idol_order, signature_url
 from eidolon.config import FishAudioModel
-from eidolon.database import readable
+from eidolon.database import by_name, readable
 from eidolon.engine import ENDED, TurnJudged, shown
+from eidolon.user_images import ImageTurn, UserImages, InvalidImage, LimitedVision, MAX_BYTES
 from eidolon.greetings import (
     LANDING_MEMORY_STILL_PATH,
     call_opener_path,
@@ -121,7 +123,19 @@ class NewConversation(BaseModel):
 
 
 class TurnInput(BaseModel):
-    text: str
+    text: str = ""
+    request_id: str | None = Field(default=None, min_length=16, max_length=64)
+    image_id: str | None = Field(default=None, max_length=64)
+    referenced_image_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _one_image(self) -> "TurnInput":
+        if self.image_id and self.referenced_image_id:
+            raise ValueError("不能同时上传新图和引用旧图")
+        if self.referenced_image_id and not self.text.strip():
+            raise ValueError("请填写想问这张图片的问题")
+        return self
+
     own_keys: OwnKeysInput | None = None
     """The user's own keys, which their browser keeps, for the turn to run on; the shape
     calls bring too. A turn uses only the LLMs and image generation, voice keys brought
@@ -287,6 +301,10 @@ def create_app(backend: Backend) -> FastAPI:
     store, characters, engine = backend.store, backend.characters, backend.engine
     memory, calls, admissions = backend.memories, backend.calls, backend.admissions
     gift_catalog, titles = backend.gift_catalog, backend.titles
+    user_images = UserImages(backend.database)
+    vision_gates: dict[int, asyncio.Semaphore] = {}
+    own_vision_gates: dict[str, asyncio.Semaphore] = {}
+    image_requests: set[tuple[str, str]] = set()
 
     def gift_of(event: ConversationEvent) -> dict:
         """For a gift record, which gift and its name, to show it by."""
@@ -327,7 +345,7 @@ def create_app(backend: Backend) -> FastAPI:
             "ja": shown.ja,
             "zh": shown.zh,
             "created_at": shown.created_at,
-        } | ({"photo": True} if shown.photo_sent else {})
+        } | ({"photo": True} if shown.photo_sent else {}) | ({"user_image": True} if shown.user_image else {})
 
     def recorded(entry: Recorded) -> dict:
         """A message, conversation event or reach-out as the browser reads it."""
@@ -338,8 +356,17 @@ def create_app(backend: Backend) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await backend.start()
-        yield
-        await backend.aclose()
+        async def clean_images() -> None:
+            while True:
+                await user_images.cleanup()
+                await asyncio.sleep(60)
+        cleanup = asyncio.create_task(clean_images())
+        try:
+            yield
+        finally:
+            cleanup.cancel()
+            await asyncio.gather(cleanup, return_exceptions=True)
+            await backend.aclose()
 
     app = FastAPI(title="Eidolon-SC", lifespan=lifespan)
     app.state.backend = backend
@@ -687,6 +714,31 @@ def create_app(backend: Backend) -> FastAPI:
         conversation = await conversation_or_404(conversation_id, user_id)
         return [recorded(entry) for entry in await store.read_by_user(conversation.id)]
 
+    @app.post("/api/conversations/{conversation_id}/images", status_code=201)
+    async def upload_user_image(conversation_id: str, request: Request, user_id: UserId) -> dict:
+        await conversation_or_404(conversation_id, user_id)
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_BYTES:
+                raise HTTPException(413, "图片不能超过 10 MB")
+        try:
+            return asdict(await user_images.upload(user_id, conversation_id, bytes(data)))
+        except InvalidImage as error:
+            raise HTTPException(422, str(error)) from None
+
+    @app.get("/api/conversations/{conversation_id}/images/{image_id}")
+    async def read_user_image(conversation_id: str, image_id: str, user_id: UserId) -> Response:
+        try:
+            _, pixels, _ = await user_images.get(user_id, conversation_id, image_id)
+        except InvalidImage:
+            raise HTTPException(404, "图片不存在") from None
+        return Response(pixels, media_type="image/webp", headers={"Cache-Control": "private, no-store"})
+
+    @app.delete("/api/conversations/{conversation_id}/images/{image_id}", status_code=204)
+    async def discard_user_image(conversation_id: str, image_id: str, user_id: UserId) -> None:
+        await user_images.discard(user_id, conversation_id, image_id)
+
     @app.post("/api/conversations/{conversation_id}/turns")
     async def text_turn(
         conversation_id: str,
@@ -697,34 +749,97 @@ def create_app(backend: Backend) -> FastAPI:
         conversation = await conversation_or_404(conversation_id, user_id)
         if body.own_llm is not None:  # transitional: see `TurnInput.own_llm`
             raise HTTPException(422, "页面已经更新，请刷新后再发")
+        fingerprint = hashlib.sha256(json.dumps([conversation_id, body.text, body.image_id, body.referenced_image_id], ensure_ascii=False).encode()).hexdigest()
+        if body.request_id:
+            receipt = await backend.database.read(lambda db: by_name(db).execute(
+                "SELECT fingerprint,response FROM image_turn_receipts WHERE user_id = ? AND id = ?",
+                (user_id, body.request_id),
+            ).fetchone())
+            if receipt:
+                if receipt["fingerprint"] != fingerprint:
+                    raise HTTPException(409, "请求标识已用于另一条消息")
+                async def replay() -> AsyncIterator[str]:
+                    yield _sse({"type": "user", "text": body.text, **({"image_id": body.image_id} if body.image_id else {})})
+                    yield _sse(json.loads(receipt["response"]))
+                return StreamingResponse(replay(), media_type="text/event-stream")
         brought = body.own_keys.brought() if body.own_keys else BroughtKeys()
+        own_vision = body.own_keys.vision_llm if body.own_keys else None
+        vision_settings = own_vision.settings() if own_vision else backend.config.vision_llm
+        if (body.image_id or body.referenced_image_id) and vision_settings is None:
+            raise HTTPException(503, "尚未配置图片理解模型")
+        if (body.image_id or body.referenced_image_id) and calls.user_in_call(user_id):
+            raise HTTPException(409, "通话中暂不支持发图")
+        if selected := body.image_id or body.referenced_image_id:
+            try:
+                await user_images.get(user_id, conversation_id, selected,
+                                      committed=body.referenced_image_id is not None)
+            except InvalidImage:
+                raise HTTPException(404, "图片不存在或已过期") from None
+        if body.image_id:
+            already_sent = await backend.database.read(lambda db: db.execute(
+                "SELECT message_id FROM user_images WHERE id = ? AND user_id = ?",
+                (body.image_id, user_id),
+            ).fetchone())
+            if already_sent and already_sent[0] is not None:
+                raise HTTPException(409, "图片已经发送，请引用这张图片或刷新对话")
         # Cancelled meanwhile, what is let in never runs, so is settled as left.
-        admission = await admissions.admitted(
-            admissions.turn(user_id, conversation.character_id, brought),
-            lambda let_in: TurnOutcome(let_in.recording, let_in.settle).over(
-                cut_short_by_failure=False
-            ),
-        )
+        request_key = (user_id, body.request_id) if body.request_id else None
+        if request_key:
+            if request_key in image_requests:
+                raise HTTPException(409, "这条消息正在处理中，请稍后重试")
+            image_requests.add(request_key)
+        try:
+            admission = await admissions.admitted(
+                admissions.turn(user_id, conversation.character_id, brought),
+                lambda let_in: TurnOutcome(let_in.recording, let_in.settle).over(
+                    cut_short_by_failure=False
+                ),
+            )
+        except BaseException:
+            if request_key:
+                image_requests.discard(request_key)
+            raise
         outcome = TurnOutcome(admission.recording, admission.settle)
 
         async def events() -> AsyncIterator[str]:
             # Closed as the response is, so that the turn is no longer under way once the user
             # has gone (`Store.taking_turn`).
             async with outcome.running():
-                async with aclosing(engine.turn(
-                    conversation, body.text, admission.llms, device_timezone,
-                    voiced_by=backend.own_keys.read_aloud_model(body.read_aloud_model),
-                    own_image=brought.image,
-                )) as turn:
-                    async for event in turn:
-                        outcome.see(event)
-                        if isinstance(event, SegmentDelta):
-                            outcome.began_speaking()  # the reply's first words have appeared
-                        if isinstance(event, SegmentComplete | SpeechDelta | TurnJudged):
-                            continue
-                        yield _sse(shown(event))
+                vision = (backend.own_keys.vision_model(vision_settings, own=True) if own_vision else backend.config.open_vision(vision_settings)) if vision_settings else None
+                if vision is not None:
+                    options = backend.config.effective("vision_llm")
+                    gate = (own_vision_gates.setdefault(user_id, asyncio.Semaphore(1)) if own_vision else
+                            vision_gates.setdefault(options["concurrency"], asyncio.Semaphore(options["concurrency"])))
+                    vision = LimitedVision(vision, backend.database, user_id, gate,
+                                           own=own_vision is not None, limit=options["hourly_limit"],
+                                           timeout=options["timeout_seconds"])
+                try:
+                    image_turn = ImageTurn(vision, body.image_id, body.referenced_image_id, body.request_id, fingerprint) if vision else None
+                    if body.image_id or body.referenced_image_id:
+                        yield _sse({"type": "image-stage", "stage": "understanding"})
+                    async with aclosing(engine.turn(
+                        conversation, body.text, admission.llms, device_timezone,
+                        voiced_by=backend.own_keys.read_aloud_model(body.read_aloud_model),
+                        own_image=brought.image, image_turn=image_turn,
+                    )) as turn:
+                        async for event in turn:
+                            outcome.see(event)
+                            if isinstance(event, SegmentDelta):
+                                outcome.began_speaking()  # the reply's first words have appeared
+                            if isinstance(event, SegmentComplete | SpeechDelta | TurnJudged):
+                                continue
+                            yield _sse(shown(event))
+                finally:
+                    if vision is not None:
+                        await vision.aclose()
 
-        return _TurnResponse(events(), lambda: outcome.over(cut_short_by_failure=False))
+        async def over() -> None:
+            try:
+                await outcome.over(cut_short_by_failure=False)
+            finally:
+                if request_key:
+                    image_requests.discard(request_key)
+        return _TurnResponse(events(), over)
 
     async def read_aloud(
         conversation: Conversation, segments: list[Segment] | None, body: ReadAloudInput,

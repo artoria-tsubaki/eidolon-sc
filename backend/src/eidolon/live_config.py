@@ -132,7 +132,8 @@ from eidolon.judge import (
     warn_if_uncalibrated,
 )
 from eidolon.llm import ChatLLM, ChatModels, LLMError
-from eidolon.llm.providers import check_chat_llm, check_chat_models
+from eidolon.llm.providers import check_chat_llm, check_chat_models, open_llm
+from eidolon.user_images import check_vision
 from eidolon.own_keys import DeployerKeys, DeployerLease, KeyCheck, OwnKeyRejected
 from eidolon.qweather import QWeather, QWeatherFailed, private_key_body
 from eidolon.proxy import ProxyRoutes, Unreachable, reach as reach_provider
@@ -149,6 +150,7 @@ the override failed its try as the server started, or was set for another model.
 
 CHAT_LLM = "chat_llm"
 MEMORY_LLM = "memory_llm"
+VISION_LLM = "vision_llm"
 TTS = "tts"
 STT = "stt"
 IMAGE = "image"
@@ -437,6 +439,32 @@ class _MemoryLLM(_LLMItem):
 
     async def check(self, client: ChatLLM, settings: LLMSettings) -> None:
         await check_chat_llm(client, settings.reasoning_effort)
+
+
+class _VisionLLM(_LLMItem):
+    name = VISION_LLM
+    fields = (*LLM_FIELDS, "hourly_limit", "concurrency", "timeout_seconds")
+
+    def env(self) -> Values:
+        return _llm_values(self.c.settings.vision_llm or LLMSettings("", "", "")) | {"hourly_limit": 20, "concurrency": 2, "timeout_seconds": 60}
+
+    async def tried(self, values: Values) -> tuple[Values, Any]:
+        if not values["api_key"] or not values["base_url"] or not values["model"]:
+            raise ConfigRejected("请填写图片理解模型的地址、模型和密钥")
+        client = open_llm(_llm(values), self.c._routes.client("vision_llm", httpx.Timeout(60, connect=10)))
+        try:
+            await check_vision(client)
+        except (LLMError, TimeoutError) as error:
+            raise ConfigRejected(str(error)[:MAX_REASON_LENGTH]) from None
+        finally:
+            await client.aclose()
+        return values, None
+
+    async def apply(self, values: Values, prepared: Any = None) -> None:
+        pass  # Each new turn opens the current settings and owns its client.
+
+    async def retry(self, values: Values) -> Values:
+        return (await self.tried(values))[0]
 
 
 class _TTS(_Item):
@@ -948,6 +976,7 @@ class _Bar(_Item):
 PROXY_LABELS: dict[ProxiedService, str] = {
     "chat_llm": "扮演角色的 LLM",
     "memory_llm": "后台模型",
+    "vision_llm": "图片理解",
     "judge": "判断模型",
     "embedding": "向量化",
     "rerank": "重排",
@@ -1142,7 +1171,7 @@ class LiveConfig:
             item.name: item
             for item in (
                 # The proxy first: as the server starts, the services are tried through it.
-                _Proxy(self), _ChatLLM(self), _MemoryLLM(self), _TTS(self), _STT(self),
+                _Proxy(self), _ChatLLM(self), _MemoryLLM(self), _VisionLLM(self), _TTS(self), _STT(self),
                 _Image(self), _GptImage(self), _Judge(self), _JudgeThresholds(self), _Rerank(self),
                 _Limits(self), _Affinity(self), _ReachOuts(self), _Letters(self), _Moments(self), _QWeather(self), _Schedule(self),
                 _Cycles(self), _Bar(self), _ServiceStatus(self), _Registration(self),
@@ -1182,6 +1211,18 @@ class LiveConfig:
     def memory_llm(self) -> LLMSettings:
         """The deployer's memory model in effect now."""
         return _llm(self.effective(MEMORY_LLM))
+
+    def open_vision(self, settings: LLMSettings) -> ChatLLM:
+        seconds = int(self.effective(VISION_LLM)["timeout_seconds"])
+        return metered_llm(
+            open_llm(settings, self._routes.client("vision_llm", httpx.Timeout(seconds, connect=10))),
+            self._activity, llm_origin("vision_llm", settings),
+        )
+
+    @property
+    def vision_llm(self) -> LLMSettings | None:
+        values = self.effective(VISION_LLM)
+        return _llm(values) if values["api_key"] and values["base_url"] and values["model"] else None
 
     @property
     def judge_settings(self) -> JudgeSettings | None:
@@ -1303,6 +1344,8 @@ class LiveConfig:
         """Whether the deployment has `service` on the deployer's keys now: the LLMs always;
         the others with their keys in effect, embedding and reranking as `.env` has them."""
         match service:
+            case "vision_llm":
+                return self.vision_llm is not None
             case "chat_llm" | "memory_llm":
                 return True
             case "tts":
@@ -1689,6 +1732,7 @@ class LiveConfig:
         targets: dict[ProxiedService, str] = {
             "chat_llm": self.chat_model.text.base_url,
             "memory_llm": self.memory_llm.base_url,
+            "vision_llm": self.vision_llm.base_url if self.vision_llm else "",
         }
         judge = self.judge_settings
         if isinstance(judge, CloudflareJudgeSettings):

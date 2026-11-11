@@ -21,6 +21,7 @@ export type ConfigStatus = "env" | "overridden" | "failed";
 export type ItemName =
   | "chat_llm"
   | "memory_llm"
+  | "vision_llm"
   | "tts"
   | "stt"
   | "image"
@@ -100,7 +101,7 @@ export type ConfigTab = (typeof CONFIG_TABS)[number];
  * sponsoring, the invite links, the prices and the read-only items are not items, so their tabs
  * list none, or only the item beside them, and the page puts their cards in itself. */
 export const TAB_ITEMS: Record<ConfigTab, ItemName[]> = {
-  models: ["chat_llm", "memory_llm", "judge", "judge_thresholds", "rerank"],
+  models: ["chat_llm", "memory_llm", "vision_llm", "judge", "judge_thresholds", "rerank"],
   voice: ["tts", "stt"],
   image: ["image", "gpt_image"],
   weather: ["qweather"],
@@ -163,6 +164,7 @@ export function statusDisplay(item: ConfigItem): StatusDisplay {
 export const PROXIED_SERVICES = [
   "chat_llm",
   "memory_llm",
+  "vision_llm",
   "judge",
   "embedding",
   "rerank",
@@ -293,6 +295,8 @@ const THRESHOLD = (names: string[]): ItemSpec => ({
 export const ITEM_SPECS: Record<ItemName, ItemSpec> = {
   chat_llm: CHAT_LLM,
   memory_llm: LLM,
+  vision_llm: { ...LLM, rows: [...LLM.rows, "hourly_limit", "concurrency", "timeout_seconds"],
+    form: [...LLM.form, { name: "hourly_limit", kind: "count" }, { name: "concurrency", kind: "positive" }, { name: "timeout_seconds", kind: "seconds" }] },
   tts: {
     rows: ["model", "api_key"],
     secrets: ["api_key"],

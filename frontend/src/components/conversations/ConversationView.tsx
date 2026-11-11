@@ -1,6 +1,8 @@
 "use client";
 
 import NextLink from "next/link";
+import { uploadUserImage, discardUserImage, userImageUrl, type UserImage } from "@/lib/api";
+import { ImageViewer } from "@/components/app/ImageViewer";
 import {
   useEffect,
   useMemo,
@@ -56,6 +58,7 @@ import { cn } from "@/lib/utils";
 import { herVars } from "@/theme/herVars";
 import {
   AchievementsIcon,
+  AddImageIcon,
   BackIcon,
   CalendarIcon,
   CooldownIcon,
@@ -135,9 +138,37 @@ export function ConversationView({
   const { open, close, go, guard, account, showPast } = useDirectory();
   const isFullScreen = !useWide();
   const isReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)", false);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploadedImage, setUploadedImage] = useState<UserImage | null>(null);
+  const [imageReference, setImageReference] = useState<string | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageFailure, setImageFailure] = useState<string | null>(null);
+  const imageInput = useRef<HTMLInputElement>(null);
+  const sendingImage = useRef(false);
+  const imageRequest = useRef<{ key: string; id: string } | null>(null);
+  const imageOwner = useRef<{ conversation: string; id: string } | null>(null);
+  const imageEpoch = useRef(0);
+  const discardDraftImage = () => {
+    const image = imageOwner.current;
+    imageOwner.current = null;
+    if (image) void discardUserImage(image.conversation, image.id).catch(() => {});
+  };
+  useEffect(() => {
+    if (!imageFile) { setImagePreview(null); return; }
+    const url = URL.createObjectURL(imageFile);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
   const [live, setLive] = useState<LiveConversation | null>(null);
   const snapshot = useSyncExternalStore(live?.subscribe ?? noSubscription, live?.snapshot ?? notOpen, notOpen);
   const { conversation, entries, call, layer, hearing, draft, failure } = snapshot;
+  const imageConversation = conversation.status === "open" ? conversation.id : null;
+  useEffect(() => {
+    imageEpoch.current++;
+    setImageFile(null); setUploadedImage(null); setImageReference(null); setImageFailure(null);
+    return () => { imageEpoch.current++; discardDraftImage(); };
+  }, [imageConversation, character.id, userId]);
   const outfits = useStandOutfits(character);
   const [pickingOutfit, setPickingOutfit] = useState(false);
   const [pickingPast, setPickingPast] = useState(false);
@@ -178,6 +209,42 @@ export function ConversationView({
     void live?.startNewConversation();
   };
   const inCall = isLive(call);
+  const selectImage = (files: FileList | File[]) => {
+    if (inCall || imageBusy || snapshot.busy) return;
+    if (files.length !== 1) { setImageFailure(t.userImage.one); return; }
+    const file = files[0];
+    if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024) {
+      setImageFailure(t.userImage.invalid); return;
+    }
+    discardDraftImage();
+    setImageFile(file); setUploadedImage(null); setImageReference(null); setImageFailure(null);
+  };
+  const submit = async () => {
+    if (!live || conversation.status !== "open" || imageBusy || sendingImage.current || snapshot.busy) return;
+    if (!imageFile && !imageReference) { await live.submit(); return; }
+    if (inCall || cooling || ended || (!imageFile && !draft.trim())) return;
+    sendingImage.current = true;
+    const epoch = imageEpoch.current;
+    setImageBusy(true); setImageFailure(null);
+    try {
+      let image = uploadedImage;
+      if (imageFile && !image) {
+        image = await uploadUserImage(conversation.id, imageFile);
+        if (imageEpoch.current !== epoch) { await discardUserImage(conversation.id, image.id); return; }
+        imageOwner.current = { conversation: conversation.id, id: image.id };
+        setUploadedImage(image);
+      }
+      const key = JSON.stringify([conversation.id, draft, image?.id, imageReference]);
+      if (imageRequest.current?.key !== key) imageRequest.current = { key, id: crypto.randomUUID() };
+      const sent = await live.submit({ ...(image ? { image_id: image.id } : { referenced_image_id: imageReference! }), request_id: imageRequest.current.id });
+      if (sent && imageEpoch.current === epoch) {
+        imageOwner.current = null;
+        setImageFile(null); setUploadedImage(null); setImageReference(null);
+      }
+    } catch (error) {
+      if (imageEpoch.current === epoch) setImageFailure(error instanceof Error ? error.message : t.userImage.failed);
+    } finally { sendingImage.current = false; setImageBusy(false); }
+  };
   // 要在这次点击里同步调用：她的声音趁这一下唤醒 AudioContext。
   const dial = () => void live?.startCall();
 
@@ -344,7 +411,7 @@ export function ConversationView({
     );
   }
 
-  const canSend = isOpen && draft.trim() !== "";
+  const canSend = isOpen && !snapshot.busy && !imageBusy && (draft.trim() !== "" || !!imageFile) && !(inCall && (imageFile || imageReference));
   const cooldownUntil = cooling ? affinity?.cooldown_until : null;
   // 冷却中的解除时刻和去礼物子页的「送她一件礼物」：冷却那一行和冷却版结束卡共用。
   const until = cooldownUntil ? untilText(new Date(cooldownUntil), new Date(), timeZone) : null;
@@ -382,14 +449,28 @@ export function ConversationView({
     <form
       inert={isCovered}
       className="flex shrink-0 flex-col gap-2 border-t bg-background px-3 py-2"
+      onDragOver={(event) => { if (!inCall) event.preventDefault(); }}
+      onDrop={(event) => { event.preventDefault(); selectImage(event.dataTransfer.files); }}
+      onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); selectImage(event.clipboardData.files); } }}
       onSubmit={(e) => {
         e.preventDefault();
-        void live?.submit();
+        void submit();
       }}
     >
       {/* 失败的原因（没登录时带去登录的入口）；通话层盖着时整栏 inert，Tab 摸不到 */}
       {failure && <FailureNotice failure={{ ...failure, message: failureText(failure) }} />}
+      {imageFailure && <p role="alert" className="text-meta">{imageFailure}</p>}
+      {(imagePreview || imageReference) && <div className="flex items-center gap-2">
+        {imagePreview && <img src={imagePreview} alt={t.userImage.preview} className="size-20 rounded-lg object-contain" />}
+        {imageReference && <span className="text-meta">{t.userImage.referenced}</span>}
+        <Button type="button" variant="ghost" size="sm" disabled={imageBusy} onClick={() => { discardDraftImage(); setImageFile(null); setUploadedImage(null); setImageReference(null); }}>{t.userImage.remove}</Button>
+      </div>}
+      {imageBusy && <p role="status" className="text-meta">{snapshot.busy ? t.userImage.understanding : t.userImage.uploading}</p>}
       <div className="flex items-end gap-2">
+        <input ref={imageInput} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" aria-label={t.userImage.add} onChange={(event) => { if (event.target.files?.length) selectImage(event.target.files); event.target.value = ""; }} />
+        <Button type="button" variant="ghost" size="icon-lg" aria-label={t.userImage.add} disabled={!isOpen || inCall || imageBusy || snapshot.busy} title={inCall ? t.userImage.callUnavailable : t.userImage.add} onClick={() => imageInput.current?.click()}>
+          <AddImageIcon className="size-5" />
+        </Button>
         <Textarea
           variant="composer"
           rows={1}
@@ -399,7 +480,7 @@ export function ConversationView({
             // 回车发送，Shift+回车换行；输入法选字时的回车不算。
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              void live?.submit();
+              void submit();
             }
           }}
           placeholder={t.placeholder}
@@ -431,6 +512,7 @@ export function ConversationView({
           viewing.status === "open" ? (
             <Messages
               key={viewing.id}
+              conversationId={viewing.id}
               entries={viewing.entries}
               hearing=""
               character={character}
@@ -465,6 +547,8 @@ export function ConversationView({
           </Empty>
         ) : (
           <Messages
+            conversationId={conversation.status === "open" ? conversation.id : ""}
+            onAskImage={inCall || snapshot.busy ? undefined : (id) => { discardDraftImage(); setImageReference(id); setImageFile(null); setUploadedImage(null); }}
             entries={entries}
             hearing={hearing}
             character={character}
@@ -640,6 +724,8 @@ function HeaderTip({ label, children }: { label: string; children: ReactElement 
  * 对话事件占一整行分隔线。她的话能朗读时（`reading`），气泡上有菜单，点过「朗读」的下面是语音条。
  */
 function Messages({
+  conversationId,
+  onAskImage,
   entries,
   hearing,
   character,
@@ -647,6 +733,8 @@ function Messages({
   timeZone,
   reading,
 }: {
+  conversationId: string;
+  onAskImage?: (id: string) => void;
   entries: Entry[];
   hearing: string;
   character: Character;
@@ -692,6 +780,8 @@ function Messages({
               ) : (
                 <MessageScrollerItem key={line.entry.key} messageId={line.entry.key} className={cn(line.first && "mt-2")}>
                   <Bubbled
+                    conversationId={conversationId}
+                    onAskImage={onAskImage}
                     line={line}
                     entry={line.entry}
                     character={character}
@@ -758,13 +848,17 @@ function herLineIn(reading: Reading, entry: Entry): Said | null {
  * 头像和名字只在一组的第一条，时间只在最后一条的外侧底部。她记下的话能朗读时气泡上有菜单，语音条在气泡下面。
  */
 function Bubbled({
+  conversationId,
+  onAskImage,
   line: { first, last },
   entry,
   character,
   reading,
   isTabStop,
 }: {
-  line: Extract<Line, { kind: "entry" }>;
+  conversationId: string;
+  onAskImage?: (id: string) => void;
+  line: Extract<Line, { kind: "entry" }>; 
   entry: Exclude<Entry, { kind: "event" }>;
   character: Character;
   reading: Reading | null;
@@ -780,7 +874,8 @@ function Bubbled({
           {last && time}
           <Bubble variant="producer" align="end" joinsPrevious={!first} joinsNext={!last}>
             <BubbleContent>
-              <p className="text-body whitespace-pre-wrap">{entry.text}</p>
+              {entry.imageId && <UserImageBlock conversationId={conversationId} imageId={entry.imageId} onAsk={onAskImage} />}
+              {entry.text ? <p className="text-body whitespace-pre-wrap">{entry.text}</p> : null}
             </BubbleContent>
           </Bubble>
         </div>
@@ -875,4 +970,17 @@ function Capsule({ children }: { children: ReactNode }) {
       {children}
     </span>
   );
+}
+
+
+function UserImageBlock({ conversationId, imageId, onAsk }: { conversationId: string; imageId: string; onAsk?: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const src = userImageUrl(conversationId, imageId);
+  return <div className="flex flex-col gap-2">
+    <button type="button" aria-label={t.userImage.sent} onClick={() => setOpen(true)}>
+      <img src={src} alt={t.userImage.sent} loading="lazy" className="max-h-72 max-w-full rounded-lg object-contain" />
+    </button>
+    {onAsk && <Button type="button" variant="ghost" size="sm" onClick={() => onAsk(imageId)}>{t.userImage.ask}</Button>}
+    <ImageViewer src={src} title={t.userImage.sent} alt={t.userImage.sent} open={open} onOpenChange={setOpen} />
+  </div>;
 }

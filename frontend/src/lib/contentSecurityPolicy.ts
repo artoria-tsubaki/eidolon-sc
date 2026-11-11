@@ -7,13 +7,18 @@
 // the share card is turned into a PNG through them, in the page. Media may be `blob:` too: her
 // words read aloud are played from the audio the page was sent (GLOSSARY.md「朗读」).
 
-/** The policy, with the stands' address if it is one. */
-export function contentSecurityPolicy(standAssetsUrl: string | undefined): string {
+/** The policy, with the stands' address if it is one. `development` allows `eval`, which
+ * React's development build uses to rebuild call stacks. Production never does. */
+export function contentSecurityPolicy(
+  standAssetsUrl: string | undefined,
+  development = false,
+): string {
   const stands = origin(standAssetsUrl);
   const standsSource = stands ? ` ${stands}` : "";
+  const scripts = development ? " 'unsafe-eval'" : "";
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src 'self' 'unsafe-inline'${scripts}`,
     "style-src 'self' 'unsafe-inline'",
     `img-src 'self' data: blob:${standsSource}`,
     `media-src 'self' blob:${standsSource}`,

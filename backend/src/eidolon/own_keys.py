@@ -655,6 +655,12 @@ class OwnKeys:
             self._own_llm("chat_llm", chat_settings), self._own_llm("memory_llm", memory_settings)
         )
 
+    def vision_model(self, settings: LLMSettings, *, own: bool) -> ChatLLM:
+        """A separately configured image-understanding model; never falls back."""
+        if own:
+            return self._own_llm("vision_llm", settings)
+        return metered_llm(open_llm(settings), self._activity, llm_origin("vision_llm", settings))
+
     def _own_llm(self, service: ServiceName, settings: LLMSettings) -> ChatLLM:
         """The user's own LLM `settings` describe, its every request recorded."""
         own = _OwnLLM(self._llm_service, settings)

@@ -33,6 +33,17 @@ describe("contentSecurityPolicy", () => {
     expect(policy.get("script-src")).toEqual(["'self'", "'unsafe-inline'"]);
   });
 
+  it("allows eval only while React is running in development", () => {
+    const policy = directives(contentSecurityPolicy(undefined, true));
+
+    expect(policy.get("script-src")).toEqual(["'self'", "'unsafe-inline'", "'unsafe-eval'"]);
+    expect(directives(contentSecurityPolicy("https://stand.example.com", true)).get("script-src")).toEqual([
+      "'self'",
+      "'unsafe-inline'",
+      "'unsafe-eval'",
+    ]);
+  });
+
   it("allows the data: and blob: images the share card is drawn through, and the blob: audio her words are read aloud from", () => {
     const policy = directives(contentSecurityPolicy(undefined));
 

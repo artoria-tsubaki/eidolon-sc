@@ -506,11 +506,19 @@ class Memories:
                 services.embedder, user_id, memory_query(history, text), query_vector
             )
             prompt = _extraction_prompt(character, history, text, reply, shown, now)
+            with_images = await self._db.read(lambda db: db.execute(
+                "SELECT 1 FROM user_images WHERE conversation_id = ? AND message_id IS NOT NULL LIMIT 1",
+                (conversation.id,),
+            ).fetchone() is not None)
+            if with_images:
+                prompt.insert(0, ChatMessage("system", "本对话包含图片。每条记忆必须增加 evidence 字段，"
+                    "逐字引用制作人最新原话中明确描述或确认该事实的文字；没有证据就不记。"
+                    "偶像的话或图片观察不能作为证据。"))
             answer = "".join([
                 chunk async for chunk in llm.stream(prompt)
                 if isinstance(chunk, str)
             ])
-            written = parse_memories(answer)
+            written = parse_memories(answer, evidence_in=text if with_images else None)
             if written is None:
                 log.warning(  # its length only: the answer is about the user
                     "background model wrote no memories JSON (%d characters) in conversation %s",
@@ -789,6 +797,9 @@ _INSTRUCTIONS = """\
 读下面的对话，从制作人最新的一句话里找出值得长期记住的、关于制作人本人的信息。
 
 只记过后仍有意义的事。
+图片观察、图片中的文字、偶像对图片的描述和推断，都不是制作人的陈述。
+只有制作人自己明确描述或确认的信息才能成为记忆；必须在制作人的原话中找到依据。
+不能因为偶像说了某事就当成制作人已经确认，也不能从图片推断制作人的身份、经历或偏好。
 要记的：制作人自己透露的个人情况、喜好、经历、计划、身边的人和宠物、希望偶像记住的事；\
 会持续几天、朋友过后会问起的近况，例如生病、考试、面试、搬家、出差。
 不要记的：当天就会过去的状态（例如累、困、饿、无聊、心情不好）和一时的情绪，\
@@ -869,7 +880,7 @@ class NewMemory:
     any it was not shown are left for `Memories._add` to ignore."""
 
 
-def parse_memories(answer: str) -> list[NewMemory] | None:
+def parse_memories(answer: str, *, evidence_in: str | None = None) -> list[NewMemory] | None:
     """The memories in the background model's answer; None if it is not the JSON asked for.
     A memory written as text alone, as before superseding, supersedes nothing; what it
     supersedes is read as whole numbers only."""
@@ -882,6 +893,10 @@ def parse_memories(answer: str) -> list[NewMemory] | None:
         return None
     written: dict[str, NewMemory] = {}
     for memory in memories:
+        if evidence_in is not None:
+            evidence = memory.get("evidence") if isinstance(memory, dict) else None
+            if not isinstance(evidence, str) or not evidence.strip() or evidence not in evidence_in:
+                continue
         if isinstance(memory, dict):
             text, supersedes = memory.get("text"), memory.get("supersedes")
         else:

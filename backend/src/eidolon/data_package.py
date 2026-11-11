@@ -15,6 +15,7 @@ leaves nothing behind, and holds up no one else's writes while it is unzipped. N
 exporting nor importing is recorded: no activity record, nothing an admin sees."""
 
 import asyncio
+import base64
 import io
 import json
 import sqlite3
@@ -81,7 +82,7 @@ from eidolon.store import (
     write_profile,
 )
 
-FORMAT = 5
+FORMAT = 6
 """The newest format this version reads, and the one it exports. Changing the format adds
 one to it, and keeps reading the older ones: 2 added her reach-outs (`reach_outs`), 3 her
 being unwell among the events (`unwell`) and the periods the user wrote down (`cycles`), 4
@@ -354,12 +355,24 @@ class PackagedMessage(_Strict):
     affinity: PackagedChange | None
     hurt: float | None
     out_of_line: bool | None
+    user_image: Annotated[str, Field(max_length=14_000_000)] | None = None
+    image_observation: Annotated[str, Field(max_length=16000)] | None = None
     photo: PackagedPhoto | None = None
     """The photo she sent with her reply; no key for a message without one, or in a package
     without photos."""
 
     @model_validator(mode="after")
     def _photos_hers(self) -> "PackagedMessage":
+        if self.user_image is not None:
+            if self.role != "user":
+                raise ValueError("user image on a character message")
+            from eidolon.user_images import normalize
+            normalize(base64.b64decode(self.user_image, validate=True))
+            if self.image_observation:
+                observation = json.loads(self.image_observation)
+                if (not isinstance(observation, dict) or set(observation) != {"visible", "text", "relevant", "uncertain"}
+                    or any(not isinstance(v, str) or len(v) > 2000 for v in observation.values())):
+                    raise ValueError("invalid image observation")
         if self.photo is not None and self.role != "character":
             raise ValueError("a photo the user sent")
         return self
@@ -373,6 +386,10 @@ class PackagedMessage(_Strict):
             created_at=message.created_at, affinity=PackagedChange.of(message.affinity),
             hurt=message.hurt, out_of_line=message.out_of_line,
         )
+        if with_photos and message.user_image is not None:
+            packaged.user_image = message.user_image
+            if message.image_observation is not None:
+                packaged.image_observation = message.image_observation
         if with_photos and message.photo is not None:
             packaged.photo = PackagedPhoto.of(message.photo)
         return packaged
@@ -384,6 +401,7 @@ class PackagedMessage(_Strict):
             [s.kept() for s in self.segments], self.created_at,
             self.affinity and self.affinity.change(), self.hurt, self.out_of_line,
             self.photo.kept() if with_photos and self.photo is not None else None,
+            self.user_image if with_photos else None, self.image_observation if with_photos else None,
         )
 
 
@@ -828,7 +846,7 @@ class DataPackages:
             ]
             counts["conversations"] = len(data.conversations)
         if "photos" in categories:
-            counts["photos"] = len(sent(data.photos()))
+            counts["photos"] = len(sent(data.photos())) + sum(m.user_image is not None for c in data.conversations or [] for m in c.messages)
         if "memories" in categories:
             data.memories = [
                 PackagedMemory.of(m, "conversations" in categories)
@@ -952,7 +970,7 @@ class DataPackages:
             unpacked.conversations.append(_Carried(
                 conversation.id,
                 conversation.whole(self._gift_catalog, with_photos),
-                len(sent(conversation.photos())) if with_photos else 0,
+                (len(sent(conversation.photos())) + sum(m.user_image is not None for m in conversation.messages)) if with_photos else 0,
             ))
         unpacked.skipped = [Skipped(name, count) for name, count in skipped.items()]
 
@@ -1089,6 +1107,9 @@ def _read(zipped: zipfile.ZipFile) -> tuple[Manifest, PackageData, dict[str, byt
         listed = set(manifest.categories)
         held = {c for c in CATEGORIES if c != "photos" and getattr(data, c) is not None}
         photos = data.photos()
+        user_images = [m for c in data.conversations or [] for m in c.messages if m.user_image]
+        if user_images and (manifest.format < 6 or "photos" not in listed):
+            raise BrokenPackage("user images without format 6 and photos category")
         if held != listed - {"photos"} or (photos and "photos" not in listed) or (
             "photos" in listed and "conversations" not in listed
         ):

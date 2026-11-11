@@ -1,3 +1,4 @@
+import { copy } from "@/i18n";
 // 消息列表每一行的内容：她最新一次对话的最后一句和时间（spec「信息架构」）；以及显示哪些行、按什么顺序排。
 // 只给出结构，文字由界面按当前语言拼（`copy.conversationList`）。
 
@@ -26,7 +27,7 @@ export function previewOfOne(conversation: Pick<LatestConversation, "created_at"
   if ("type" in last) {
     return { from: "event", event: last.kind, gift: last.gift_name ?? null, unwell: unwellOf(last), at: last.created_at };
   }
-  if (last.role === "user") return { from: "you", text: last.text ?? "", at: last.created_at };
+  if (last.role === "user") return { from: "you", text: last.text || (last.user_image ? copy.conversationList.userImage : ""), at: last.created_at };
   return { from: "her", text: last.zh || last.ja || "", at: last.created_at, photo: last.photo === true };
 }
 

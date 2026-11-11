@@ -115,7 +115,7 @@ export type Conversation = {
  * after all), or her reach-out, shown as her reply is, marked `reach_out`; or a conversation event
  * other than her ending it; null while it has none. */
 export type LastMessage =
-  | (Pick<Message, "role" | "text" | "ja" | "zh" | "created_at"> & { photo?: true; reach_out?: true })
+  | (Pick<Message, "role" | "text" | "ja" | "zh" | "created_at"> & { photo?: true; user_image?: true; reach_out?: true })
   | Pick<ConversationEvent, "type" | "kind" | "created_at" | "gift_name" | "first_day" | "days_ago">
   | null;
 
@@ -141,7 +141,11 @@ export type ListedConversation = Conversation & {
 
 export type Segment = { ja: string; zh: string };
 
+export type UserImage = { id: string; width: number; height: number };
+export type ImageInput = { request_id?: string; image_id?: string; referenced_image_id?: string };
+
 export type Message = {
+  user_image?: UserImage;
   id: number;
   role: "user" | "character";
   text: string | null;
@@ -213,7 +217,8 @@ export type Recorded = Message | ConversationEvent | ReachOut;
  * did, what the turn was rewarded with (lib/rewards), null if nothing, and her being unwell,
  * recorded before the user's words, if it was. */
 export type TurnEvent =
-  | { type: "user"; text: string }
+  | { type: "user"; text: string; image_id?: string }
+  | { type: "image-stage"; stage: "understanding" }
   | { type: "photo"; id: string; status: "pending" }
   | { type: "delta"; segment: number; lang: "ja" | "zh"; text: string }
   | { type: "photos-used-up"; retry_at: string }
@@ -1051,11 +1056,11 @@ export async function getCallSetup(conversationId: string, own: readonly OwnServ
  * delivery cues as it reads them (`read_aloud_model`, GLOSSARY.md「朗读」); and yields the reply's
  * server-sent events as they arrive.
  */
-export async function* sendTurn(conversationId: string, text: string, userId: string): AsyncGenerator<TurnEvent> {
+export async function* sendTurn(conversationId: string, text: string, userId: string, image?: ImageInput): AsyncGenerator<TurnEvent> {
   const res = await api(`/api/conversations/${conversationId}/turns`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text, own_keys: turnOwnKeys(userId), read_aloud_model: readAloudModel(userId) }),
+    body: JSON.stringify({ text, ...image, own_keys: turnOwnKeys(userId), read_aloud_model: readAloudModel(userId) }),
   });
   yield* serverSentEvents<TurnEvent>(res);
 }
@@ -1100,4 +1105,21 @@ async function* serverSentEvents<T>(res: Response): AsyncGenerator<T> {
       if (data) yield JSON.parse(data) as T;
     }
   }
+}
+
+
+export function userImageUrl(conversationId: string, imageId: string): string {
+  return `/api/conversations/${encodeURIComponent(conversationId)}/images/${encodeURIComponent(imageId)}`;
+}
+export async function uploadUserImage(conversationId: string, file: File): Promise<UserImage> {
+  return json(await api(`/api/conversations/${encodeURIComponent(conversationId)}/images`, {
+    method: "POST", headers: { "content-type": file.type || "application/octet-stream" }, body: file,
+  }));
+}
+export async function discardUserImage(conversationId: string, imageId: string): Promise<void> {
+  const response = await api(userImageUrl(conversationId, imageId), { method: "DELETE" });
+  if (!response.ok) await json(response);
+}
+export async function checkOwnVisionLLM(llm: LocalModel): Promise<Pick<LocalModel, "base_url" | "model">> {
+  return checkOwnModel("/api/account/keys/vision-llm/check", llm);
 }

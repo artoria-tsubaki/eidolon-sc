@@ -390,3 +390,12 @@ describe("conversationLog", () => {
     });
   });
 });
+
+it("keeps an image-only user message through submission and reload", () => {
+  const submitted = conversationLog(emptyLog, { type: "submitted", text: "", at: "2026-11-10T00:00:00Z", image_id: "image-one" });
+  expect(submitted.entries[0]).toMatchObject({ kind: "user", text: "", imageId: "image-one" });
+  const confirmed = conversationLog(submitted, { type: "user", text: "", at: "2026-11-10T00:00:00Z", image_id: "image-one" });
+  expect(confirmed.entries[0]).toMatchObject({ imageId: "image-one" });
+  const loaded = conversationLog(emptyLog, { type: "loaded", messages: [{ ...message(1, "user", ""), user_image: { id: "image-one", width: 40, height: 30 } }] });
+  expect(loaded.entries[0]).toMatchObject({ kind: "user", text: "", imageId: "image-one" });
+});

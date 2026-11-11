@@ -204,6 +204,12 @@ def _messages(messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
                 {"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments or {}}
                 for c in message.tool_calls
             )
+        elif message.images:
+            content = ([{"type": "text", "text": message.content}] if message.content else []) + [
+                {"type": "image", "source": {"type": "base64", "media_type": image.media_type,
+                                            "data": image.data}}
+                for image in message.images
+            ]
         elif message.content:
             content = message.content
         else:

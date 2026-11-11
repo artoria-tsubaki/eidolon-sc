@@ -1,3 +1,4 @@
+import type { ImageInput } from "@/lib/api";
 // The conversation page for one character: opening her conversation (or starting a new
 // one), its log, the text turn under way, the call and how the call layer is shown, her
 // stand as the call moves it on (by the rules in `standDirection.ts`), and her affinity as
@@ -306,7 +307,7 @@ export type Ports = {
     preferences: CallPreferences,
     handlers: CallHandlers,
   ) => Promise<Call>;
-  sendTurn: (conversationId: string, text: string) => AsyncIterable<TurnEvent>;
+  sendTurn: (conversationId: string, text: string, image?: ImageInput) => AsyncIterable<TurnEvent>;
   /** How a photo she sent is coming along. */
   getPhoto: (id: string) => Promise<PhotoStatus>;
   /** Her affinity with the user now; null while affinity is off. */
@@ -441,27 +442,27 @@ export class LiveConversation {
   }
 
   /** Send what is in the input box as a text turn. */
-  async submit(): Promise<void> {
+  async submit(image?: ImageInput): Promise<boolean> {
     const text = this.state.draft.trim();
     const conversationId = this.openConversationId();
     // One exchange at a time: not over a text turn, nor into a call still dialing; none in a
     // cooldown, nor into a conversation she has ended.
-    if (!text || !conversationId || this.state.busy || this.state.call.phase === "dialing") return;
-    if (isCooling(this.state) || isEnded(this.state)) return;
+    if ((!text && !image?.image_id) || !conversationId || this.state.busy || this.state.call.phase === "dialing") return false;
+    if (isCooling(this.state) || isEnded(this.state) || (image && this.call)) return false;
     this.update({ draft: "", failure: null });
     if (this.call) {
       // The call takes it up like speech; its reply arrives as call events. Typed while she
       // speaks, it interrupts her.
       this.call.sendText(text);
       this.moveCard({ type: "interrupted", typed: text }, { stand: this.directed({ type: "typed" }) });
-      return;
+      return false;
     }
-    this.apply({ type: "submitted", text, at: this.isoNow() }, { busy: true });
+    this.apply({ type: "submitted", text, at: this.isoNow(), ...(image?.image_id && { image_id: image.image_id }) }, { busy: true });
 
     let failure: Failure | null = null;
     let done = false;
     try {
-      for await (const event of this.ports.sendTurn(conversationId, text)) {
+      for await (const event of this.ports.sendTurn(conversationId, text, image)) {
         this.applyTurnEvent(event);
         if (event.type === "done") done = true;
         // A turn that failed leaves no record and does not count towards the limit.
@@ -475,7 +476,7 @@ export class LiveConversation {
         // Refused for a cooldown begun elsewhere: shown as one, the text kept for when it ends.
         this.apply({ type: "interrupted" }, { draft: text, busy: false });
         this.cooled(e.cooldownUntil);
-        return;
+        return false;
       }
       failure = toFailure(e);
       // Refused by the backend (over the limit, own key failed, ...): not counted.
@@ -486,6 +487,7 @@ export class LiveConversation {
       this.apply({ type: "interrupted" }, { draft: text, failure });
     }
     this.update({ busy: false });
+    return done && !failure;
   }
 
   /**

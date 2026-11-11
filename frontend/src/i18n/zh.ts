@@ -132,6 +132,7 @@ export const zh = {
     fetchNeedsKey: "填好接口地址和 API key 后可以获取。",
   },
   conversationList: {
+    userImage: "[图片]",
     title: "对话",
     noneSelected: "选一位偶像开始对话",
     resize: "调整对话列表宽度",
@@ -189,6 +190,7 @@ export const zh = {
     serviceStatusNames: {
       chat_llm: "对话",
       memory_llm: "记忆",
+      vision_llm: "图片理解",
       tts: "语音合成",
       stt: "语音识别",
       judge: "判断",
@@ -200,6 +202,10 @@ export const zh = {
     serviceStatusWindow: (minutes: number) => `最近 ${minutes} 分钟`,
   },
   conversation: {
+    userImage: { add: "添加图片", remove: "移除图片", preview: "待发送图片", sent: "制作人发送的图片",
+      uploading: "正在上传…", understanding: "正在看图…", ask: "问这张图", referenced: "正在询问这张图片",
+      invalid: "请选择不超过 10 MB 的 JPEG、PNG 或静态 WebP 图片", failed: "图片上传失败，请重试",
+      callUnavailable: "通话中暂不支持发图", one: "每条消息只能发送一张图片" },
     back: "返回对话列表",
     menu: "更多操作",
     /** 她有没看过的成就解锁时，更多菜单键的读屏名字。 */
@@ -821,6 +827,7 @@ export const zh = {
       phoneTextureHint: "让角色的声音像隔着电话听筒。下次接通时生效；开启后，不同通话音质之间的差别会变小。",
     },
     ownKeys: {
+      visionTitle: "图片理解模型", visionHint: "先结合对话理解图片，再交给对话模型回应。使用这把密钥失败时不会改用部署者密钥。",
       // 外面两句和 ⓘ 里的详细说明，措辞跟隐私说明逐句对齐过（PR #62），改措辞要同步隐私说明。
       summary:
         "填了自己的 API key，这一项服务就改用你的额度，费用由你承担。密钥只保存在这台设备的这个浏览器里，换设备、换浏览器或清除浏览器数据后要重新填写。",
@@ -1157,6 +1164,7 @@ export const zh = {
         services: {
           chat_llm: "扮演角色的 LLM",
           memory_llm: "后台模型",
+          vision_llm: "图片理解",
           tts: "语音合成",
           stt: "语音识别",
           judge: "判断模型",
@@ -1508,6 +1516,7 @@ export const zh = {
           title: "扮演角色的 LLM",
           hint: "模型需要支持流式输出和工具调用，保存前会先用同样的检查试调一次。",
         },
+        vision_llm: { title: "图片理解模型", hint: "独立理解制作人发来的图片；支持自带视觉模型密钥。保存时用测试图片验证。" },
         memory_llm: {
           title: "后台模型",
           hint: "每个回合结束后用它从对话里记下关于制作人的事，第 3 个回合后也用它给对话起标题。保存前和扮演角色的 LLM 一样先试调一次。",
@@ -1599,6 +1608,7 @@ export const zh = {
       failed: (reason: string) => `后台覆盖的配置没有生效，现在用的是 .env 的值。原因：${reason}`,
       columns: { field: "项", env: ".env 的值", effective: "当前生效", override: "后台覆盖" },
       fields: {
+        hourly_limit: "每人每小时看图次数", timeout_seconds: "看图超时（秒）",
         protocol: "接口类型",
         base_url: "接口地址（base_url）",
         model: "模型名",
@@ -1636,7 +1646,7 @@ export const zh = {
         exempting_stt: "免限额密钥：语音识别",
         enabled: "好感度和礼物",
         api_format: "接口形式",
-        concurrency: "同时生成几张",
+        concurrency: "并发数",
         style: "画风",
         quality: "质量",
       } as Record<string, string>,
@@ -1667,6 +1677,7 @@ export const zh = {
           password: "代理密码",
           chat_llm: "扮演角色的 LLM 走代理",
           memory_llm: "后台模型走代理",
+          vision_llm: "图片理解模型走代理",
           judge: "判断模型走代理",
           embedding: "向量化走代理",
           rerank: "重排走代理",
@@ -1683,6 +1694,7 @@ export const zh = {
           window_minutes: "统计时段",
           chat_llm: "显示「对话」（扮演角色的 LLM）",
           memory_llm: "显示「记忆」（后台模型）",
+          vision_llm: "显示「图片理解」",
           tts: "显示「语音合成」",
           stt: "显示「语音识别」",
           judge: "显示「判断」（判断模型）",

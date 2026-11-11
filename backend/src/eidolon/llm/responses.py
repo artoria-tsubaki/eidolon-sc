@@ -149,8 +149,13 @@ def _items(message: ChatMessage) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = [
         item for r in message.reasoning for item in r.data.get("items", ())
     ]
-    if message.content:
-        items.append({"role": message.role, "content": message.content})
+    if message.content or message.images:
+        items.append({"role": message.role, "content": (
+            [{"type": "input_text", "text": message.content}] + [
+                {"type": "input_image", "image_url": image.data_url}
+                for image in message.images
+            ] if message.images else message.content
+        )})
     items.extend(
         {
             "type": "function_call",

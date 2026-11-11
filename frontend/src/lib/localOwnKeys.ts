@@ -82,6 +82,7 @@ export type LocalOwnKeys = {
   tts?: LocalTtsKey;
   stt?: LocalSttKey;
   memory_llm?: LocalModel;
+  vision_llm?: LocalModel;
   image?: LocalImage;
 };
 
@@ -106,6 +107,8 @@ export function localOwnKeys(userId: string): LocalOwnKeys {
   if (!isRecord(stored)) return {};
   const keys: LocalOwnKeys = {};
   const { llm, tts, stt, memory_llm, image } = stored;
+  const vision = localModel(stored.vision_llm);
+  if (vision) keys.vision_llm = vision;
   const model = localModel(llm);
   if (model) {
     keys.llm = model;
@@ -191,10 +194,10 @@ export function forgetOwnKeys(userId: string): void {
  * 两样都没存就不带。 */
 export function turnOwnKeys(
   userId: string,
-): Pick<LocalOwnKeys, "llm" | "memory_llm" | "image"> | undefined {
-  const { llm, memory_llm, image } = localOwnKeys(userId);
-  if (!llm && !image) return undefined;
-  return { ...(llm && { llm, ...(memory_llm && { memory_llm }) }), ...(image && { image }) };
+): Pick<LocalOwnKeys, "llm" | "memory_llm" | "image" | "vision_llm"> | undefined {
+  const { llm, memory_llm, image, vision_llm } = localOwnKeys(userId);
+  if (!llm && !image && !vision_llm) return undefined;
+  return { ...(llm && { llm, ...(memory_llm && { memory_llm }) }), ...(image && { image }), ...(vision_llm && { vision_llm }) };
 }
 
 /** 朗读（GLOSSARY.md「朗读」）要带的 `own_keys`：只带这位用户存的语音合成那一把，没存就不带。 */

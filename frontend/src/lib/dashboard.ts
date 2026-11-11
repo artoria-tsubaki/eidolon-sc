@@ -61,6 +61,7 @@ export function dashboardHref(pathname: string, range: DashboardRange, tab: Dash
 export type ServiceName =
   | "chat_llm"
   | "memory_llm"
+  | "vision_llm"
   | "tts"
   | "stt"
   | "judge"

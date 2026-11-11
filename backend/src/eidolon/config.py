@@ -54,7 +54,7 @@ REGISTRATIONS: tuple[Registration, ...] = get_args(Registration)
 
 ProxiedService = Literal[
     "chat_llm", "memory_llm", "judge", "embedding", "rerank", "tts", "stt", "image",
-    "gpt_image", "own_llm", "own_tts", "own_stt", "own_image",
+    "gpt_image", "vision_llm", "own_llm", "own_tts", "own_stt", "own_image",
 ]
 """What may reach its provider through the proxy (GLOSSARY.md「网络代理」): the deployer's
 services, the chat model, in text turns and calls alike; the memory model; the judge
@@ -73,7 +73,7 @@ OWN_KEYS_PROXIED: dict[Service, ProxiedService] = {
 PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
 
 ServiceName = Literal[
-    "chat_llm", "memory_llm", "tts", "stt", "judge", "embedding", "rerank", "image"
+    "chat_llm", "memory_llm", "tts", "stt", "judge", "embedding", "rerank", "image", "vision_llm"
 ]
 """The outside services: the LLM playing the characters and the one writing down memories,
 speech synthesis and recognition, the judge model, embedding, reranking and image
@@ -456,6 +456,7 @@ class Settings:
     chat_llm: LLMSettings
     background_llm: LLMSettings = None  # pyright: ignore[reportAssignmentType]  # see below
     """Left out, the background model is the chat model."""
+    vision_llm: LLMSettings | None = None
     call_reasoning_effort: ReasoningEffort | None = None
     """The chat model's in calls (`CHAT_LLM_CALL_REASONING_EFFORT`): see `chat_model`."""
     ice_servers: list[IceServer] = field(default_factory=lambda: list(DEFAULT_ICE_SERVERS))
@@ -602,6 +603,7 @@ class Settings:
             characters_path=characters_path_from_env(),
             chat_llm=chat_llm,
             background_llm=LLMSettings.background_from_env(),
+            vision_llm=LLMSettings._from_env("VISION") if os.environ.get("VISION_LLM_MODEL") else None,
             call_reasoning_effort=effort_from_env(
                 "CHAT_LLM_CALL_REASONING_EFFORT", chat_llm.protocol
             ),

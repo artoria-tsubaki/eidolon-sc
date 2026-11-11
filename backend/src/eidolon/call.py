@@ -1156,6 +1156,11 @@ class Calls:
         )
         await self._webrtc.handle_patch_request(patch)
 
+    def user_in_call(self, user_id: str) -> bool:
+        return any(p.user_id == user_id for p in self._placing) or any(
+            live.user_id == user_id and not live.over for live in self._live
+        )
+
     @property
     def in_progress(self) -> int:
         """How many calls there are now, connected or still connecting."""

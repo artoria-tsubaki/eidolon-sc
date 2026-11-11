@@ -33,6 +33,9 @@ export {
 // 发送键和更多菜单。
 export { ArrowUp as SendIcon, Ellipsis as MoreIcon } from "lucide-react";
 
+// 输入栏左边的发图键（DESIGN.md「输入栏」）：一张图片的图标。
+export { Image as AddImageIcon } from "lucide-react";
+
 // 失败提示（components/app/FailureNotice）。
 export { CircleAlert as FailureIcon } from "lucide-react";
 

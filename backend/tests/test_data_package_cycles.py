@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from eidolon import data_package
 from eidolon.config import Settings
 from tests.conftest import ClientFactory
 from tests.test_cycle_records import added, client_of, firsts
@@ -67,7 +68,7 @@ async def test_records_go_into_a_package_with_their_category_alone(
     _, manifest, data = unzipped(await export(client, "conversations,cycles"))
     _, without_manifest, without = unzipped(await export(client, "conversations"))
 
-    assert manifest["format"] == 5
+    assert manifest["format"] == data_package.FORMAT
     assert manifest["categories"] == ["conversations", "cycles"]
     assert manifest["counts"] == {"conversations": 0, "cycles": 3}
     assert data["cycles"] == [

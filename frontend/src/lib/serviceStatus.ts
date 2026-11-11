@@ -4,7 +4,7 @@
 import { api, json } from "@/lib/api";
 
 /** The deployer's services, in the order they are shown. */
-export const STATUS_SERVICES = ["chat_llm", "memory_llm", "tts", "stt", "judge", "embedding", "rerank", "image"] as const;
+export const STATUS_SERVICES = ["chat_llm", "memory_llm", "vision_llm", "tts", "stt", "judge", "embedding", "rerank", "image"] as const;
 
 export type StatusService = (typeof STATUS_SERVICES)[number];
 

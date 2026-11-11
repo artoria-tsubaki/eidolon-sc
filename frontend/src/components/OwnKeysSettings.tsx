@@ -21,6 +21,7 @@ import {
   checkOwnImage,
   checkOwnLLM,
   checkOwnMemoryLLM,
+  checkOwnVisionLLM,
   checkOwnSpeechKey,
   getAccount,
   getLimitExemption,
@@ -156,6 +157,10 @@ export function OwnKeysSettings() {
           onChecked={(llm) => change(() => keepOwnKey(userId, "llm", llm))}
           onDelete={() => change(() => forgetOwnKey(userId, "llm"))}
         />
+        <Separator />
+        <OwnLLMForm kind="vision" current={kept.vision_llm} disabled={!canKeep}
+          onChecked={(llm) => change(() => keepOwnKey(userId, "vision_llm", llm))}
+          onDelete={() => change(() => forgetOwnKey(userId, "vision_llm"))} />
         {/* 后台模型只附加在自带 LLM 上：没填 LLM 时不显示，删掉 LLM 时一起删掉（`forgetOwnKey`）。 */}
         {kept.llm && (
           <>
@@ -551,6 +556,8 @@ function OwnImageForm({
 
 /** 两种自带 LLM 的表单各自的文案和试调：`callEffort` 是有没有通话那一档。 */
 const LLM_FORMS = {
+  vision: { title: t.visionTitle, hint: t.visionHint, notSet: t.notSet,
+    effort: t.textEffort, effortHint: t.textEffortHint, callEffort: false, check: checkOwnVisionLLM },
   chat: {
     title: t.llmTitle,
     hint: t.llmHint,

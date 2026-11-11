@@ -121,7 +121,7 @@ from eidolon.store import Message
 log = logging.getLogger(__name__)
 
 SERVICES: tuple[ServiceName, ...] = SERVICE_NAMES
-LLM_SERVICES: tuple[ServiceName, ...] = ("chat_llm", "memory_llm")
+LLM_SERVICES: tuple[ServiceName, ...] = ("chat_llm", "memory_llm", "vision_llm")
 """The LLMs among them (`llm_origin`): a user's own is recorded as `OWN`, and each call
 says how soon its first word came and at which reasoning effort."""
 

@@ -18,7 +18,7 @@
 
 ```json
 {
-  "format": 5,
+  "format": 6,
   "exported_at": "2026-10-19T08:00:00.000000+00:00",
   "categories": ["conversations", "photos", "memories", "profile", "cycles", "letters"],
   "counts": { "conversations": 12, "photos": 3, "memories": 40, "profile": 1, "cycles": 9, "letters": 2 }
@@ -275,3 +275,7 @@
 
 - 整个数据包最大 200 MB，超了不导入（错误码 `too_large`），可以不带照片重新导出。
 - 解压后 `manifest.json` 最大 64 KB，`data.json` 最大 200 MB，每张照片的文件最大 20 MB，超了当坏包。
+
+## 格式 6：用户图片
+
+消息增加可选 `user_image`（经服务器规范化的 WebP，base64 编码）和 `image_observation`（JSON 字符串，visible/text/relevant/uncertain）。仅 role=user 的消息可以携带用户图片，只有选择 photos 类别时导出这些字段。图片最多 10 MB，导入会重新校验和规范化，不信任外部尺寸或路径，并重新分配内部图片 ID。旧格式没有这些字段，继续正常导入；旧版本拒绝格式 6，避免静默丢失用户图片。
