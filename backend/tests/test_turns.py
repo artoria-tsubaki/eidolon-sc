@@ -7,14 +7,13 @@ text turn or during a call; the SSE and call tests only cover how each carries i
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from eidolon.config import Settings
-from eidolon.engine import MAX_INPUT_LENGTH
+from eidolon.engine import MAX_INPUT_LENGTH, shown
 from eidolon.llm import ToolCall
 from eidolon.own_keys import BroughtKeys
 from eidolon.reply_format import SegmentComplete, SpeechDelta
@@ -68,7 +67,7 @@ class Turns:
         finally:
             await backend.aclose()
         return [
-            asdict(e) for e in events if in_house or not isinstance(e, SegmentComplete | SpeechDelta)
+            shown(e) for e in events if in_house or not isinstance(e, SegmentComplete | SpeechDelta)
         ]
 
     async def record(self) -> list[tuple]:

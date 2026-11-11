@@ -1732,8 +1732,9 @@ class LiveConfig:
         targets: dict[ProxiedService, str] = {
             "chat_llm": self.chat_model.text.base_url,
             "memory_llm": self.memory_llm.base_url,
-            "vision_llm": self.vision_llm.base_url if self.vision_llm else "",
         }
+        if self.vision_llm is not None:
+            targets["vision_llm"] = self.vision_llm.base_url
         judge = self.judge_settings
         if isinstance(judge, CloudflareJudgeSettings):
             targets["judge"] = CLOUDFLARE_API_URL

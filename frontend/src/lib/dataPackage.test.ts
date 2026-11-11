@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api";
 import {
   choose,
   chosenCategories,
+  FORMAT,
   exportHref,
   packageFailure,
   importSummary,
@@ -64,7 +65,7 @@ describe("读数据包开头的 manifest.json", () => {
   });
 
   it("格式比这里新时是 too_new", async () => {
-    const file = zip({ "manifest.json": [JSON.stringify({ ...MANIFEST, format: 6 }), 0], "data.json": ["{}", 6] });
+    const file = zip({ "manifest.json": [JSON.stringify({ ...MANIFEST, format: FORMAT + 1 }), 0], "data.json": ["{}", 6] });
 
     expect(await readManifest(file)).toEqual({ kind: "too_new" });
   });

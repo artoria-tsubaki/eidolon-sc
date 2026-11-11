@@ -670,7 +670,9 @@ async def test_a_saved_proxy_is_tried_on_the_services_it_reroutes_then_holds_unt
     assert restored.status_code == 200, restored.text
 
     assert before["status"] == "env" and before["effective"]["enabled"] is False
-    assert before["unconfigured"] == ["judge", "embedding", "rerank", "image", "gpt_image"]
+    assert before["unconfigured"] == [
+        "judge", "embedding", "rerank", "image", "gpt_image", "vision_llm",
+    ]
     # The judge model is not configured, users' own keys are not here: neither is tried.
     # The password, kept apart, is not shown.
     proxy = "http://me:hunter2@127.0.0.1:7890"

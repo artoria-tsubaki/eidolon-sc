@@ -275,6 +275,7 @@ class ProxyInput(BaseModel):
     stt: StrictBool
     image: StrictBool
     gpt_image: StrictBool
+    vision_llm: StrictBool
     own_llm: StrictBool
     own_tts: StrictBool
     own_stt: StrictBool
@@ -294,6 +295,7 @@ class ServiceStatusInput(BaseModel):
     embedding: StrictBool
     rerank: StrictBool
     image: StrictBool
+    vision_llm: StrictBool
 
 
 class RegistrationInput(BaseModel):

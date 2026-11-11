@@ -922,10 +922,16 @@ class ConversationEngine:
                                 result = observed.prompt()
                             except (InvalidImage, LLMError, TimeoutError):
                                 result = "这次未能重新查看图片，只能使用已有摘要，不能声称确认了新细节。"
-                    elif recalled_tool or retrieved.recalled:
+                    elif call.name == RECALL_STORY_TOOL.name and (recalled_tool or retrieved.recalled):
                         result = "本回合已经检索过剧情，请根据已有内容回答。"
                     else:
-                        recalled_tool = True
+                        query = (call.arguments or {}).get("query")
+                        if (
+                            call.name == RECALL_STORY_TOOL.name
+                            and isinstance(query, str)
+                            and query.strip()
+                        ):
+                            recalled_tool = True
                         result = await _unless_stopped(stop, self._call_tool, character, call)
                     if last_round:
                         result = f"{result}\n\n{LAST_ROUND_NOTE}"

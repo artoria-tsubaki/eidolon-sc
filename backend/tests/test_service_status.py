@@ -33,7 +33,7 @@ from tests.test_live_config import REPLY, admin_client
 STATUS = "/api/service-status"
 SERVICE_STATUS = "/api/admin/config/service_status"
 SHOWN = {"window_minutes": 30} | dict.fromkeys(
-    ("chat_llm", "memory_llm", "tts", "stt", "judge", "embedding", "rerank", "image"), True
+    ("chat_llm", "memory_llm", "vision_llm", "tts", "stt", "judge", "embedding", "rerank", "image"), True
 )
 
 
@@ -168,7 +168,9 @@ async def test_admins_choose_which_services_users_are_shown_and_over_how_long(
 
     assert {s["service"]: s["status"] for s in before.json()["services"]}["tts"] == "down"
     assert saved.status_code == 200, saved.text
-    assert saved.json()["service_status"]["unconfigured"] == ["judge", "embedding", "rerank", "image"]
+    assert saved.json()["service_status"]["unconfigured"] == [
+        "judge", "embedding", "rerank", "image", "vision_llm",
+    ]
     # At once, though users were shown it a moment ago; what the probes found, maybe of a
     # key since changed, is forgotten until they try again.
     assert after.json() == {
