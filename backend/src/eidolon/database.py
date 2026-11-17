@@ -67,6 +67,16 @@ USER_DATA = [
     ("invited_users", "user_id = ?"),
     ("sessions", "user_id = ?"),
     ("sign_in_methods", "user_id = ?"),
+    ("group_chat_photos",
+     "message_id IN (SELECT m.id FROM group_chat_messages m"
+     " JOIN group_chat_turns t ON m.turn_id = t.id"
+     " JOIN group_chats g ON t.group_id = g.id WHERE g.user_id = ?)"),
+    ("group_chat_messages",
+     "turn_id IN (SELECT t.id FROM group_chat_turns t"
+     " JOIN group_chats g ON t.group_id = g.id WHERE g.user_id = ?)"),
+    ("group_chat_turns", "group_id IN (SELECT id FROM group_chats WHERE user_id = ?)"),
+    ("group_chat_members", "group_id IN (SELECT id FROM group_chats WHERE user_id = ?)"),
+    ("group_chats", "user_id = ?"),
     ("users", "id = ?"),
 ]
 """Every table holding a user's data, and which rows are theirs, in an order that deletes

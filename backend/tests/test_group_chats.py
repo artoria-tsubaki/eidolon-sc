@@ -475,5 +475,6 @@ async def test_group_data_package_round_trip_and_account_deletion(
 
     assert (await client.post("/api/account/delete", json={"confirm": True})).status_code == 204
     with sqlite3.connect(settings.database_path) as db:
-        for table in ("group_chats", "group_chat_members", "group_chat_turns", "group_chat_messages"):
+        for table in ("group_chats", "group_chat_members", "group_chat_turns",
+                      "group_chat_messages", "group_chat_photos"):
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
