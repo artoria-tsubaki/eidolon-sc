@@ -83,7 +83,7 @@ from eidolon.store import (
     write_profile,
 )
 
-FORMAT = 8
+FORMAT = 9
 """The newest format this version reads, and the one it exports. Changing the format adds
 one to it, and keeps reading the older ones: 2 added her reach-outs (`reach_outs`), 3 her
 being unwell among the events (`unwell`) and the periods the user wrote down (`cycles`), 4
@@ -639,6 +639,7 @@ class PackagedGroup(_Strict):
         if len(set(self.members)) != len(self.members):
             raise ValueError("repeated group member")
         messages: set[str] = set()
+        replies_seen: set[str] = set()
         photo_attachments: set[str] = set()
         for turn in self.turns:
             targets = turn.targets
@@ -649,6 +650,11 @@ class PackagedGroup(_Strict):
             user, *replies = turn.messages
             if user.character_id is not None or not user.text or len(user.text) > 2000 or user.segments:
                 raise ValueError("invalid group user message")
+            if user.reply_to is not None and user.reply_to not in replies_seen:
+                raise ValueError("invalid group reply reference")
+            if any(reply.reply_to is not None for reply in replies):
+                raise ValueError("invalid group reply reference")
+            replies_seen.update(reply.id for reply in replies)
             speakers = [reply.character_id for reply in replies]
             if (len(set(speakers)) != len(speakers)
                 or any(speaker not in self.members for speaker in speakers)
@@ -1215,6 +1221,10 @@ def _read(zipped: zipfile.ZipFile) -> tuple[Manifest, PackageData, dict[str, byt
             for group in data.group_chats or []
         ):
             raise BrokenPackage("extended group chat before format 8")
+        if manifest.format < 9 and any(
+            message.reply_to for group in data.group_chats or [] for turn in group.turns for message in turn.messages
+        ):
+            raise BrokenPackage("group reply reference before format 9")
         photos = data.photos()
         user_images = [m for c in data.conversations or [] for m in c.messages if m.user_image]
         if user_images and (manifest.format < 6 or "photos" not in listed):

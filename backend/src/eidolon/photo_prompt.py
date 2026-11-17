@@ -86,7 +86,8 @@ a wide shot."""
 
 Composition = Literal["scenery", "food", "object", "selfie", "posed", "candid", "group"]
 COMPOSITIONS: tuple[Composition, ...] = get_args(Composition)
-UNPEOPLED: tuple[Composition, ...] = ("scenery", "food", "object")
+Unpeopled = Literal["scenery", "food", "object"]
+UNPEOPLED: tuple[Unpeopled, ...] = get_args(Unpeopled)
 """The compositions of a moment's picture no one is in."""
 GROUP_FRAMINGS: tuple[PictureFraming, ...] = ("upper body", "cowboy shot")
 """How much of them a group photo someone else takes can show: enough to tell each by her
@@ -321,6 +322,25 @@ def picture_prompt(character: Character, tag: PictureTag, style: str = "") -> Im
         *shot, tag.framing, *tag.place, *tag.outfit, *action, *after,
     )
     return _prompt(positive, negative)
+
+
+def group_chat_photo_prompt(
+    sender: Character, subjects: tuple[Character, ...] | Unpeopled, text: str, style: str,
+) -> tuple[ImagePrompt, tuple[Crossing, ...]] | None:
+    """Build a chat photo from the chosen subjects and the sender's scene tags."""
+    fields = tag_fields(text)
+    if isinstance(subjects, str):
+        picture = read_picture({**fields, "composition": subjects}, [subjects])
+        return (picture_prompt(sender, picture, style), picture.stripped) if picture else None
+    if len(subjects) == 1:
+        photo = read_tag(text)
+        return image_prompt(subjects[0], photo, style), photo.stripped
+    first, *others = subjects
+    if fields.get("shot", "").lower() == "selfie":
+        fields["action"] = fields.get("action", "") + ", selfie"
+    idol_tags = tuple(person.photo_tag for person in subjects if person.photo_tag)
+    picture = _group(fields, tuple(others), idol_tags)
+    return picture_prompt(first, picture, style), picture.stripped
 
 
 def _group_prompt(

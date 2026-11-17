@@ -73,13 +73,15 @@ from eidolon.config import ImageSettings
 from eidolon.gpt_image_prompt import GptPrompt
 from eidolon.image_generation import TIME_LIMIT, GptImageGenerator, ImageFailed, ImageGenerator
 from eidolon.own_keys import masked_cause
-from eidolon.photo_prompt import Crossing, PictureTag, image_prompt, picture_prompt, read_tag
+from eidolon.photo_prompt import (
+    Crossing, PictureTag, Unpeopled, group_chat_photo_prompt, image_prompt, picture_prompt, read_tag,
+)
 from eidolon.store import Photo, PhotoFailure, Store
 from eidolon.usage import OverLimit, UsageLimiter
 
 log = logging.getLogger(__name__)
 
-CAN_SEND = """\
+_PHOTO_INSTRUCTIONS = """\
 # 照片
 制作人在要你发一张照片。你可以发，也可以按你的性格和此刻的情境推掉（比如害羞、正在忙）。
 要发的话，在回复的最前面、第一个 <ja> 之前写一个照片标签，一行一栏，格式如下：
@@ -97,10 +99,12 @@ note: 在咖啡店给他拍的自拍
 - outfit：1–4 个英文 tag，写一套衣服，只写这个景别里看得见的。
 - action：2–4 个英文 tag，写一个动作、一两个表情；不看镜头时加一个视线。
 - note：一句中文，写这是一张什么样的照片，只给你自己回看。
-- place、outfit、action 合计不超过 12 个 tag。照片里只有你一个人；不写发色、瞳色、发型、身材，也不写画风或画师。
+- place、outfit、action 合计不超过 12 个 tag。{subjects}不写发色、瞳色、发型、身材，也不写画风或画师。
 - 照着现在的时间和你们正在聊的事拍；他指定了地点或服装，在全年龄的范围内照办。
 - 不拍裸露和半裸、内衣和情趣服装、透视、走光、洗澡，也不拍性感的姿势、表情和镜头；泳装、睡衣、躺在床上可以拍。他要这些时，你可以推掉，也可以换成全年龄的样子再拍。
 - 一次回复最多一张。标签后面照常用 <ja><zh> 说话。"""
+
+CAN_SEND = _PHOTO_INSTRUCTIONS.format(subjects="照片里只有你一个人；")
 """What she is told in a turn the user asks for a photo in, and she can send one."""
 
 NOT_NOW = """\
@@ -120,6 +124,7 @@ CANNOT_SEND = """\
 你发不了照片。制作人要你发照片时，用你自己的话推掉，不要写照片标签。"""
 """What she is told in every turn that could not have a photo, whether or not the user asks
 for one: the judge model is not asked."""
+
 
 NOT_RECEIVED = """\
 # 没发出去的照片
@@ -163,6 +168,16 @@ def photo_turn(asked: bool, tier: Tier | None, eligibility: Eligibility) -> Phot
     if tier == COLDEST:
         return PhotoTurn(NOT_NOW, keeps_tag=False)
     return PhotoTurn(CAN_SEND, keeps_tag=True)
+
+
+def group_photo_turn(subjects: tuple[Character, ...] | Unpeopled) -> PhotoTurn:
+    if isinstance(subjects, str):
+        subject = {"scenery": "风景", "food": "食物", "object": "物品"}[subjects]
+        instruction = f"按制作人的要求拍{subject}，画面中没有人物。action 一栏写主要拍摄对象。"
+    else:
+        names = "、".join(person.name for person in subjects)
+        instruction = f"入镜人物只有{names}。按这份名单拍摄，发照片的人可以在镜头外。"
+    return PhotoTurn(_PHOTO_INSTRUCTIONS.format(subjects=instruction), keeps_tag=True)
 
 
 @dataclass
@@ -261,6 +276,12 @@ class Photos:
         a read task of the caller's."""
         if not character.photographed:
             return None
+        return self.user_eligibility(db, user_id, own)
+
+    def user_eligibility(
+        self, db: sqlite3.Connection, user_id: str, own: ImageSettings | None,
+    ) -> Eligibility | None:
+        """Check whether the user can send a picture, independently of its subjects."""
         if own is not None:
             return Eligibility()
         if self._generator() is None:
@@ -271,9 +292,36 @@ class Photos:
             return None if e.retry_at is None else Eligibility(e.retry_at)
         return Eligibility()
 
+    def group_unavailable(
+        self, subjects: tuple[Character, ...] | Unpeopled, own: ImageSettings | None,
+    ) -> str | None:
+        """Explain why a requested group picture cannot be made, before a photo is promised."""
+        generator = self._generator() if own is None else None
+        settings = generator.settings if generator is not None else own
+        return self._group_unavailable(subjects, settings)
+
+    @staticmethod
+    def _group_unavailable(
+        subjects: tuple[Character, ...] | Unpeopled, settings: ImageSettings | None,
+    ) -> str | None:
+        if settings is None:
+            return "图片生成服务未配置。"
+        if isinstance(subjects, str):
+            return None
+        missing = [person.name for person in subjects if not person.photographed]
+        if missing:
+            return "缺少「" + "、".join(missing) + "」的外貌资料。"
+        legacy = settings.model in ("nai-diffusion", "safe-diffusion") or settings.model.startswith(
+            ("nai-diffusion-2", "nai-diffusion-3", "nai-diffusion-furry")
+        )
+        if len(subjects) > 1 and (settings.api_format != "novelai" or legacy):
+            return "当前图片服务或模型不支持多人合照。"
+        return None
+
     def begin(
         self, character: Character, tag: str, user_id: str, own: ImageSettings | None = None,
         *, finish: Callable[[str, bytes | None, PhotoFailure | None], Awaitable[bool]] | None = None,
+        pictured: tuple[Character, ...] | Unpeopled | None = None,
     ) -> str:
         """Begin the photo her `tag` says, for the user, generating on their `own` image
         generation if the turn brings it, else on the deployer's, in the turn it is begun
@@ -282,7 +330,7 @@ class Photos:
         self._generating[photo_id] = _Generating(finish or self._store.finish_photo)
         until = asyncio.get_running_loop().time() + TIME_LIMIT
         task = asyncio.create_task(
-            self._generate(photo_id, character, tag, user_id, own, until, recording())
+            self._generate(photo_id, character, tag, user_id, own, until, recording(), pictured)
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -322,6 +370,7 @@ class Photos:
         own: ImageSettings | None,
         until: float,
         turn: Recording | None,
+        pictured: tuple[Character, ...] | Unpeopled | None = None,
     ) -> None:
         """Count the photo against the user's limit, as exempt on their `own` image
         generation, and generate it by `until` (the running loop's time), its request
@@ -336,7 +385,7 @@ class Photos:
             log.exception("counting photo %s failed", photo_id)
             outcome = None, "service_error"
         else:
-            outcome = await self._generated(photo_id, character, tag, own, until, turn)
+            outcome = await self._generated(photo_id, character, tag, own, until, turn, pictured)
             if outcome[0] is None:
                 await use.give_back()
         generating = self._generating[photo_id]
@@ -355,6 +404,7 @@ class Photos:
         own: ImageSettings | None,
         until: float,
         turn: Recording | None,
+        pictured: tuple[Character, ...] | Unpeopled | None = None,
     ) -> tuple[bytes | None, PhotoFailure | None]:
         """The photo generated by `until`, on the user's `own` image generation if any,
         or why it was not: on their own, anything but taking too long is their key's
@@ -364,7 +414,16 @@ class Photos:
             if generator is None:
                 raise ImageFailed("service_error", "image generation is off")
             settings = generator.settings
-            read = read_tag(tag)
+            if pictured is None:
+                read = read_tag(tag)
+                prompt, stripped = image_prompt(character, read, settings.style), read.stripped
+            else:
+                if problem := self._group_unavailable(pictured, settings):
+                    raise ImageFailed("service_error", problem)
+                prepared = group_chat_photo_prompt(character, pictured, tag, settings.style)
+                if prepared is None:
+                    raise ImageFailed("service_error", "照片缺少拍摄对象。")
+                prompt, stripped = prepared
             async with self._turn_on(
                 "image", settings.api_key, settings.concurrency, until, aside=False
             ):
@@ -372,8 +431,8 @@ class Photos:
                     image = await timed(
                         self._activity,
                         image_origin(settings) if own is None else OWN_IMAGE_ORIGIN,
-                        generator.generate(image_prompt(character, read, settings.style), until),
-                        read.stripped,
+                        generator.generate(prompt, until),
+                        stripped,
                     )
             return image.webp, None
         except ImageFailed as e:

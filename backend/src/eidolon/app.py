@@ -161,6 +161,7 @@ class GroupTurnInput(BaseModel):
     text: str
     mention_ids: list[str] | None = Field(default=None, max_length=3)
     mention_id: str | None = None
+    reply_to: str | None = Field(default=None, max_length=64)
     request_id: str = Field(min_length=16, max_length=64)
     own_keys: OwnKeysInput | None = None
 
@@ -947,7 +948,7 @@ def create_app(backend: Backend) -> FastAPI:
             [body.mention_id] if body.mention_id is not None else []
         )
         run = await groups.begin(user_id, group_id, body.request_id, mentions,
-                                 text, brought, device_timezone)
+                                 text, brought, device_timezone, body.reply_to)
         if isinstance(run, GroupTurn):
             async def replay() -> AsyncIterator[str]:
                 for message in run.messages:

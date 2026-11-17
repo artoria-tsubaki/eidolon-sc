@@ -4,10 +4,11 @@ import asyncio
 import json
 import logging
 import re
-import unicodedata
 import sqlite3
+import unicodedata
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Literal
@@ -18,11 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from eidolon.activity import Result
 from eidolon.admission import Admission, Admissions, CoolingDown
-from eidolon.affinity import Affinities
+from eidolon.affinity import Affinities, tier_prompt
 from eidolon.affinity_judge import AffinityJudge
 from eidolon.config import ImageSettings
 from eidolon.judge import JudgeError
-from eidolon.photos import CANNOT_SEND, Photos, PhotoTurn, photo_turn
 from eidolon.characters import Character
 from eidolon.clock import Clock
 from eidolon.data_access import Database
@@ -30,6 +30,8 @@ from eidolon.delivery_cues import without_cues
 from eidolon.llm import ChatLLM, ChatMessage
 from eidolon.memory import Memories
 from eidolon.own_keys import BroughtKeys, OwnKeyFailed, TurnKeys
+from eidolon.photo_prompt import UNPEOPLED, Unpeopled
+from eidolon.photos import CANNOT_SEND, Photos, PhotoTurn, group_photo_turn, photo_turn
 from eidolon.producer import effective_timezone, local_date, producer_prompt
 from eidolon.reply_format import PhotoTagged, ReplyParser, SegmentDelta, format_instructions
 from eidolon.retrieval import Retrieval
@@ -130,6 +132,7 @@ class GroupMessage(BaseModel):
     segments: list[GroupSegment] = Field(default_factory=list)
     created_at: str
     photo: GroupPhoto | None = None
+    reply_to: str | None = None
 
 
 class GroupTurn(BaseModel):
@@ -159,6 +162,14 @@ class GroupDetail(GroupSummary):
     turns: list[GroupTurn]
 
 
+@dataclass(frozen=True)
+class _GroupPhoto:
+    sender: str
+    turn: PhotoTurn
+    pictured: tuple[Character, ...] | Unpeopled | None = None
+    problem: str | None = None
+
+
 def _key(members: Sequence[str]) -> str:
     return json.dumps(sorted(members), ensure_ascii=False)
 
@@ -168,6 +179,9 @@ def _create_tables(db: sqlite3.Connection) -> None:
     columns = {row[1] for row in db.execute("PRAGMA table_info(group_chat_turns)")}
     if "mentioned_ids" not in columns:
         db.execute("ALTER TABLE group_chat_turns ADD COLUMN mentioned_ids TEXT")
+    message_columns = {row[1] for row in db.execute("PRAGMA table_info(group_chat_messages)")}
+    if "reply_to" not in message_columns:
+        db.execute("ALTER TABLE group_chat_messages ADD COLUMN reply_to TEXT")
 
 
 def _prepare(db: sqlite3.Connection) -> None:
@@ -196,12 +210,13 @@ def _insert_group(
 
 
 def _message(row: tuple) -> GroupMessage:
-    id, character, text, segments, at, photo, status, reason = row
+    id, character, text, segments, at, photo, status, reason, reply_to = row
     return GroupMessage(id=id, character_id=character, text=text, segments=json.loads(segments),
-                        created_at=at, photo=GroupPhoto(id=photo, status=status, reason=reason) if photo else None)
+                        created_at=at, photo=GroupPhoto(id=photo, status=status, reason=reason) if photo else None,
+                        reply_to=reply_to)
 
 
-_MESSAGE_COLUMNS = "m.id,m.character_id,m.text,m.segments,m.created_at,p.id,p.status,p.reason"
+_MESSAGE_COLUMNS = "m.id,m.character_id,m.text,m.segments,m.created_at,p.id,p.status,p.reason,m.reply_to"
 _PHOTO_JOIN = " LEFT JOIN group_chat_photos p ON p.message_id=m.id"
 _PHOTO_OWNER = (
     " FROM group_chat_photos p JOIN group_chat_messages m ON p.message_id=m.id"
@@ -307,12 +322,14 @@ def add_packaged_group(
 ) -> bool:
     if (group := _insert_group(db, user, members, at)) is None:
         return False
+    ids = {message.id: uuid4().hex for turn in turns for message in turn.messages}
     for turn in turns:
         id = _insert_turn(db, group, uuid4().hex, turn.targets,
                           "interrupted" if turn.status == "running" else turn.status)
         for position, message in enumerate(turn.messages):
-            new_id = uuid4().hex
-            _insert_message(db, id, position, message.model_copy(update={"id": new_id}))
+            new_id = ids[message.id]
+            _insert_message(db, id, position, message.model_copy(update={"id": new_id,
+                            "reply_to": ids.get(message.reply_to) if message.reply_to else None}))
             if photo := photos.get(message.id):
                 _insert_photo(db, new_id, KeptPhoto(uuid4().hex, photo.tag, photo.status,
                                                      photo.reason, photo.created_at, photo.updated_at),
@@ -330,7 +347,7 @@ def _delete(db: sqlite3.Connection, user: str, group: str) -> None:
 
 
 def _request(
-    db: sqlite3.Connection, user: str, request: str, group: str, mentions: list[str], text: str
+    db: sqlite3.Connection, user: str, request: str, group: str, mentions: list[str], text: str, reply_to: str | None
 ) -> GroupTurn | None:
     row = db.execute(
         "SELECT t.id,t.status,t.mentioned_id,t.mentioned_ids,t.group_id FROM group_chat_turns t"
@@ -340,7 +357,7 @@ def _request(
         return None
     id, status, mentioned, stored_mentions, in_group = row
     turn = _read_turn(db, id, status, mentioned, stored_mentions)
-    if in_group != group or turn.targets != mentions or turn.messages[0].text != text:
+    if in_group != group or turn.targets != mentions or turn.messages[0].text != text or turn.messages[0].reply_to != reply_to:
         raise RequestConflict()
     if status == "running":
         raise GroupBusy()
@@ -359,10 +376,20 @@ def _insert_turn(
 
 def _insert_message(db: sqlite3.Connection, turn: int, position: int, message: GroupMessage) -> None:
     db.execute(
-        "INSERT INTO group_chat_messages VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO group_chat_messages (id,turn_id,position,character_id,text,segments,created_at,reply_to) VALUES (?,?,?,?,?,?,?,?)",
         (message.id, turn, position, message.character_id, message.text,
-         json.dumps([s.model_dump() for s in message.segments], ensure_ascii=False), message.created_at),
+         json.dumps([s.model_dump() for s in message.segments], ensure_ascii=False), message.created_at, message.reply_to),
     )
+
+
+def _quoted(db: sqlite3.Connection, group: str, id: str) -> GroupMessage:
+    row = db.execute(
+        f"SELECT {_MESSAGE_COLUMNS} FROM group_chat_messages m JOIN group_chat_turns t ON m.turn_id=t.id"
+        f"{_PHOTO_JOIN} WHERE t.group_id=? AND m.id=? AND m.character_id IS NOT NULL", (group, id),
+    ).fetchone()
+    if row is None:
+        raise BadGroup("引用的消息不存在或不属于本群。")
+    return _message(row)
 
 
 def _start(
@@ -547,14 +574,20 @@ class GroupChats:
     async def begin(
         self, user: str, group: str, request: str, mentions: list[str], text: str,
         brought: BroughtKeys, device_timezone: str | None,
+        reply_to: str | None = None,
     ) -> GroupTurn | GroupRun:
         await self._db.read(_owned, user, group)
         members = await self._db.read(_members, group)
         if len(set(mentions)) != len(mentions) or any(m not in members for m in mentions):
             raise BadGroup("点名名单只能包含不同的本群成员。")
         addressed = _addressed(text, [self._characters[m] for m in members if m in self._characters])
-        targets = list(dict.fromkeys([*mentions, *(m for ids, _ in addressed for m in ids)]))
-        if existing := await self._db.read(_request, user, request, group, targets, text):
+        quoted = await self._db.read(_quoted, group, reply_to) if reply_to else None
+        quote_target: list[str] = []
+        if quoted is not None and quoted.character_id is not None:
+            quote_target.append(quoted.character_id)
+        targets: list[str] = list(dict.fromkeys([*quote_target, *mentions,
+                                                *(m for ids, _ in addressed for m in ids)]))
+        if existing := await self._db.read(_request, user, request, group, targets, text, reply_to):
             return existing
         key = user, request
         if group in self._busy or key in self._requests:
@@ -577,11 +610,14 @@ class GroupChats:
             if not available:
                 raise BadGroup("本群可用的成员都在冷却中，请晚些再来。" if cooling else
                                "本群成员在当前部署不可用。")
+            if quoted and any(target not in available for target in targets):
+                raise BadGroup("被引用或点名的成员暂时无法回复，请稍后重试。")
             admission = await self._admissions.admitted(
                 self._admissions.group_turn(user, brought), lambda entry: entry.settle("failed")
             )
             message = GroupMessage(id=uuid4().hex, character_id=None, text=text,
-                                   created_at=self._clock().astimezone(UTC).isoformat(timespec="microseconds"))
+                                   created_at=self._clock().astimezone(UTC).isoformat(timespec="microseconds"),
+                                   reply_to=reply_to)
             starting = asyncio.create_task(self._db.write(_start, user, group, request, targets, message))
             try:
                 turn = await asyncio.shield(starting)
@@ -590,7 +626,7 @@ class GroupChats:
                 await admission.settle("left")
                 raise
             return self._run(user, group, turn, request, members, available, message, targets, admission,
-                             device_timezone, addressed, brought.image)
+                             device_timezone, addressed, brought.image, quoted)
         except BaseException:
             self._busy.discard(group)
             self._requests.discard(key)
@@ -602,6 +638,7 @@ class GroupChats:
         self, user: str, group: str, turn: int, request: str, members: list[str], available: list[str],
         message: GroupMessage, targets: list[str], admission: Admission[TurnKeys],
         device_timezone: str | None, addressed: list[tuple[list[str], str]], own_image: ImageSettings | None,
+        quoted: GroupMessage | None,
     ) -> GroupRun:
         status: Status = "interrupted"
         result: Result = "left"
@@ -612,6 +649,7 @@ class GroupChats:
             nonlocal status, result
             yield {"type": "message", "turn_id": turn, "message": message.model_dump(), "mentioned_ids": targets}
             detail = None
+            photo_problem = None
             saved = 0
             with admission.recording.current():
                 try:
@@ -620,28 +658,48 @@ class GroupChats:
                     snapshot = [*history, message]
                     direct = [m for m in targets if m in available]
                     others = [m for m in available if m not in targets]
+                    if quoted and others:
+                        try:
+                            select_prompt = [ChatMessage("system", "判断哪些群成员有必要补充回答。只返回一个成员ID，或 none；最多选一人。"),
+                                             ChatMessage("user", json.dumps({"candidates": others,
+                                                 "quote": self._transcript([quoted]), "question": message.text}, ensure_ascii=False))]
+                            async def select() -> str:
+                                return "".join([chunk async for chunk in _reply_text(admission.llms.chat, select_prompt)]).strip()
+                            chosen = await asyncio.wait_for(select(), timeout=5)
+                            others = [chosen] if chosen in others else []
+                        except Exception:
+                            others = []
                     speakers = [*direct, *others]
                     direct_replies: list[GroupMessage] = []
                     replies: list[GroupMessage] = []
-                    sending_photo = await self._photo_for(user, speakers, targets, addressed, history, own_image)
+                    sending_photo = await self._photo_for(
+                        user, speakers, targets, addressed, history, own_image, members, admission.llms.chat,
+                        message.text or "",
+                    )
+                    photo_problem = sending_photo.problem if sending_photo else None
                     for position, speaker in enumerate(speakers, 1):
                         try:
                             await self._admissions.refuse_while_cooling(user, speaker)
                         except CoolingDown:
+                            if quoted and speaker in targets:
+                                detail = f"{self._speaker_name(speaker)}暂时无法回复，请重试。"
                             continue
                         context = snapshot if speaker in direct else [
                             *snapshot, *(direct_replies if targets else replies),
                         ]
-                        photo = sending_photo[1] if sending_photo and speaker == sending_photo[0] else None
+                        if quoted:
+                            context = [quoted, *[m for m in context if m.id != quoted.id]]
+                        photo = sending_photo if sending_photo and speaker == sending_photo.sender else None
                         id = uuid4().hex
                         parser = ReplyParser()
                         tag = None
                         try:
-                            prompt = await self._prompt(user, speaker, members, context, device_timezone, targets, photo)
+                            prompt = await self._prompt(user, speaker, members, context, device_timezone, targets,
+                                                        photo.turn if photo else None)
                             async with aclosing(_reply_text(admission.llms.chat, prompt)) as chunks:
                                 async for part in chunks:
                                     for event in parser.feed(part):
-                                        if isinstance(event, PhotoTagged) and photo and photo.keeps_tag:
+                                        if isinstance(event, PhotoTagged) and photo and photo.turn.keeps_tag:
                                             tag = event.tag
                                         elif isinstance(event, SegmentDelta):
                                             admission.recording.spoke()
@@ -656,14 +714,16 @@ class GroupChats:
                                 raise ValueError("empty group reply")
                             reply = GroupMessage(id=id, character_id=speaker, segments=segments,
                                                  created_at=self._clock().astimezone(UTC).isoformat(timespec="microseconds"))
-                            await self._commit_reply(user, turn, position, reply, tag, own_image)
+                            await self._commit_reply(user, turn, position, reply, tag, own_image,
+                                                     photo.pictured if photo else None)
                         except OwnKeyFailed as e:
-                            detail = e.message
+                            detail = (f"{self._speaker_name(speaker)}的回复未完成，请重试。" if quoted and speaker in targets else e.message)
                             yield {"type": "discard", "message_id": id}
                             continue
                         except Exception:
                             log.exception("group reply by %s failed in %s, turn %s", speaker, group, turn)
-                            detail = detail or "部分回复未完成，可以继续发送消息。"
+                            detail = detail or (f"{self._speaker_name(speaker)}的回复未完成，请重试。"
+                                                if quoted and speaker in targets else "部分回复未完成，可以继续发送消息。")
                             yield {"type": "discard", "message_id": id}
                             continue
                         saved += 1
@@ -680,7 +740,7 @@ class GroupChats:
                     status, result = "failed", "failed"
                     detail = detail or "这轮没有可发言的成员。"
                 await self._db.write(_finish, turn, status)
-            yield {"type": "done", "turn_id": turn, "status": status, "detail": detail}
+            yield {"type": "done", "turn_id": turn, "status": status, "detail": detail or photo_problem}
 
         stream = events()
 
@@ -705,7 +765,7 @@ class GroupChats:
 
     async def _commit_reply(
         self, user: str, turn: int, position: int, message: GroupMessage, tag: str | None,
-        own: ImageSettings | None,
+        own: ImageSettings | None, pictured: tuple[Character, ...] | Unpeopled | None = None,
     ) -> None:
         if tag is None or message.character_id is None:
             await self._db.write(_save_reply, turn, position, message, None)
@@ -713,7 +773,7 @@ class GroupChats:
         # Keep the message and its pending photo together even if the stream closes meanwhile.
         with CancelScope(shield=True):
             id = self._photos.begin(self._characters[message.character_id], tag, user, own,
-                                    finish=self._finish_photo)
+                                    finish=self._finish_photo, pictured=pictured)
             message.photo = GroupPhoto(id=id, status="pending", reason=None)
             try:
                 await self._db.write(_save_reply, turn, position, message, tag)
@@ -724,8 +784,9 @@ class GroupChats:
 
     async def _photo_for(
         self, user: str, speakers: list[str], targets: list[str], addressed: list[tuple[list[str], str]],
-        history: list[GroupMessage], own: ImageSettings | None,
-    ) -> tuple[str, PhotoTurn] | None:
+        history: list[GroupMessage], own: ImageSettings | None, members: list[str], model: ChatLLM,
+        text: str,
+    ) -> _GroupPhoto | None:
         judge = self._photo_judge
         if judge is None:
             return None
@@ -745,29 +806,78 @@ class GroupChats:
                 general.append(clause)
         requests = [(id, "。".join(parts)) for id, parts in directed.items()]
         general_text = "。".join(general)
-        if general_text:
-            requests.extend((id, general_text) for id in speakers if not targets or id in targets)
+        general_sender = next((id for id in speakers if not targets or id in targets), None)
+        if general_text and general_sender is not None:
+            requests.append((general_sender, general_text))
         for speaker, question in requests:
             character = self._characters[speaker]
-            eligible = await self._db.read(self._photos.eligibility, character, user, own)
-            if eligible is None:
-                continue
             try:
                 _, asked = await judge.judge(character, context, question, False, True)
             except JudgeError:
                 return None
             if not asked:
-                if question == general_text:
-                    break
                 continue
+            try:
+                pictured = await self._photo_cast(model, question, text, members, speaker)
+            except Exception:
+                return self._photo_refused(speaker, "无法确定照片里的成员，请明确指定后重试。")
+            if problem := self._photos.group_unavailable(pictured, own):
+                return self._photo_refused(speaker, problem)
+            eligible = await self._db.read(self._photos.user_eligibility, user, own)
+            if eligible is None:
+                return self._photo_refused(speaker, "当前没有可用的照片额度。")
             affinity = (
                 await self._db.read(self._affinities.read_status, user, speaker)
                 if self._affinities.on else None
             )
             photo = photo_turn(asked, affinity.tier if affinity else None, eligible)
             if photo:
-                return speaker, photo
+                if photo.keeps_tag:
+                    return _GroupPhoto(speaker, group_photo_turn(pictured), pictured)
+                problem = "照片额度暂时用完了。" if photo.used_up_until else f"{character.name}现在不想发照片。"
+                return _GroupPhoto(speaker, photo, problem=problem)
         return None
+
+    @staticmethod
+    def _photo_refused(speaker: str, problem: str) -> _GroupPhoto:
+        return _GroupPhoto(speaker, PhotoTurn(f"# 照片\n{problem}请向制作人说明，不要写照片标签。", False),
+                           problem=problem)
+
+    async def _photo_cast(
+        self, model: ChatLLM, request: str, text: str, members: list[str], sender: str,
+    ) -> tuple[Character, ...] | Unpeopled:
+        """Resolve the image subjects, independently of who was asked to send it."""
+        prompt = [ChatMessage("system", "识别制作人要拍的照片内容，只输出一个 JSON 对象。"
+                              "根据已选中的请求判断，原消息可以补全名字和指代。"
+                              '未指定入镜角色时输出 {"members":null}，表示全体群成员入镜。'
+                              '明确指定角色时输出 {"members":["角色ID"]}，按要求列出一至多位。'
+                              "指定谁发照片不代表谁入镜；要求某位成员自己的自拍时，她单独入镜。"
+                              '明确只拍风景、食物或物品时输出 {"subject":"scenery"}、'
+                              '{"subject":"food"} 或 {"subject":"object"}。'
+                              '指定了不在名单中的人或无法确定指定对象时输出 {"unsupported":true}。'),
+                  ChatMessage("user", json.dumps({"request": request, "message": text, "sender": sender,
+                    "members": [{"id": m, "name": self._speaker_name(m),
+                                 "aliases": [self._characters[m].short_name, self._characters[m].name_zh,
+                                             self._characters[m].name_kana, self._characters[m].name_romaji]}
+                                for m in members]}, ensure_ascii=False))]
+        async def classify() -> str:
+            return "".join([chunk async for chunk in _reply_text(model, prompt)])
+        response = await asyncio.wait_for(classify(), timeout=5)
+        start, end = response.find("{"), response.rfind("}")
+        parsed = json.loads(response[start:end + 1])
+        for subject in UNPEOPLED:
+            if parsed == {"subject": subject}:
+                return subject
+        if not isinstance(parsed, dict) or parsed.keys() != {"members"}:
+            raise ValueError("invalid photo subjects")
+        ids = parsed["members"]
+        if ids is None:
+            ids = members
+        if (not isinstance(ids, list) or not ids
+            or any(not isinstance(id, str) or id not in members or id not in self._characters for id in ids)
+            or len(ids) != len(set(ids))):
+            raise ValueError("invalid photo participants")
+        return tuple(self._characters[id] for id in ids)
 
     def _speaker_name(self, id: str) -> str:
         character = self._characters.get(id)
@@ -796,6 +906,8 @@ class GroupChats:
     ) -> list[ChatMessage]:
         character = self._characters[speaker]
         profile = await self._db.read(read_profile, user)
+        affinity = (await self._db.read(self._affinities.read_status, user, speaker)
+                    if self._affinities.on else None)
         timezone = effective_timezone(profile, device_timezone)
         world = (
             self._world.prompt(character.name, local_date(self._clock(), timezone)) if self._world else None
@@ -823,6 +935,8 @@ class GroupChats:
                 "别人讲过的经历是你听来的，只有自己出场过的剧情才是你的亲历。"
                 "对话记录中的名字用于识别说话人，不要在输出里加姓名前缀。",
                 "群聊成员：制作人、" + "、".join(map(self._speaker_name, members)) + "。",
+                *tier_prompt(affinity),
+                "这是大家都能听到的群聊，表达与制作人的亲近时注意公开场合。",
                 guidance,
                 "对话中只有 photo_status 为 ready 的照片已经发出。不要猜照片里有什么。",
             ]), cache_breakpoint=True),

@@ -9,6 +9,7 @@ export type GroupMessage = {
   segments: GroupSegment[];
   created_at: string;
   photo?: Photo | null;
+  reply_to?: string | null;
 };
 export type GroupStatus = "running" | "done" | "failed" | "interrupted";
 export type GroupTurn = {
@@ -109,13 +110,13 @@ export async function deleteGroup(id: string): Promise<void> {
 }
 
 export async function* sendGroupTurn(id: string, userId: string, text: string, mentions: string[],
-  requestId: string, signal: AbortSignal): AsyncGenerator<GroupEvent> {
+  requestId: string, signal: AbortSignal, replyTo: string | null = null): AsyncGenerator<GroupEvent> {
   const { llm, image } = localOwnKeys(userId);
   const res = await api(groupPath(id) + "/turns", {
     method: "POST",
     headers: { "content-type": "application/json" },
     signal,
-    body: JSON.stringify({ text, mention_ids: mentions, request_id: requestId,
+    body: JSON.stringify({ text, mention_ids: mentions, request_id: requestId, reply_to: replyTo ?? undefined,
       own_keys: llm || image ? { llm, image } : undefined }),
   });
   yield* serverSentEvents<GroupEvent>(res);

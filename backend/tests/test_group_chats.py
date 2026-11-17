@@ -8,8 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
+import pytest
 
 from eidolon.config import Settings
+from eidolon.affinity import affinity_prompt
+from eidolon.judge import SAID
 from eidolon.llm import LLMError
 from tests.conftest import CharacterConfig, ClientFactory
 from tests.fakes import (
@@ -102,6 +105,56 @@ async def test_automatic_and_mentioned_replies_are_attributed_and_replayed(
         assert db.execute("SELECT count(*) FROM service_calls WHERE record_id=?", (records[0][0],)).fetchone() == (2,)
 
 
+async def test_group_replies_use_each_members_affinity_without_changing_it(
+    make_client: ClientFactory, settings: Settings,
+):
+    llm = FakeLLM(MANO, KOGANE)
+    settings = replace(settings, judge=FAKE_JUDGE, affinity_and_gifts=True)
+    client = make_client(llm, settings=settings, clock=FakeClock())
+    keep(settings.database_path, "producer", 85, START)
+    keep(settings.database_path, "producer", 65, START, character="kogane")
+    group = await create(client)
+    await events(client, group, body())
+    assert affinity_prompt("intimate", None)[0] in llm.prompts[0][0].content
+    assert affinity_prompt("close", None)[0] in llm.prompts[1][0].content
+    with sqlite3.connect(settings.database_path) as db:
+        values = dict(db.execute("SELECT character_id, value FROM affinities"))
+    assert values == {"mano": 85, "kogane": 65}
+
+
+async def test_quote_targets_author_checks_scope_and_survives_replay(make_client: ClientFactory):
+    llm = FakeLLM(MANO, KOGANE, ["none"], MANO)
+    client = make_client(llm)
+    group = await create(client)
+    first = await events(client, group, body())
+    original = next(e["message"] for e in first if e["type"] == "message" and e["message"]["character_id"] == "mano")
+    payload = body(text="你刚才是什么意思？") | {"reply_to": original["id"]}
+    result = await events(client, group, payload)
+    assert [e["message"]["character_id"] for e in result if e["type"] == "message"] == [None, "mano"]
+    assert "一緒に歌おう。" in llm.prompts[-1][-1].content
+    assert (await detail(client, group))["turns"][-1]["messages"][0]["reply_to"] == original["id"]
+    assert (await events(client, group, payload))[0]["message"]["reply_to"] == original["id"]
+    other_group = await create(client, ["kogane", "mano"])
+    response = await client.post(f"/api/group-chats/{other_group}/turns", json=body() | {"reply_to": original["id"]})
+    assert response.status_code == 422
+
+
+async def test_quote_survives_package_with_remapped_ids(make_client: ClientFactory, settings: Settings, tmp_path: Path):
+    client = make_client(FakeLLM(MANO, KOGANE, ["none"], MANO))
+    group = await create(client)
+    first = await events(client, group, body())
+    quoted = next(e["message"] for e in first if e["type"] == "message" and e["message"]["character_id"] == "mano")
+    await events(client, group, body(text="什么意思？") | {"reply_to": quoted["id"]})
+    package = await export(client, "conversations")
+    other = other_deployment(make_client, settings, tmp_path)
+    imported = await import_package(other, package, "conversations")
+    assert imported.status_code == 200, imported.text
+    group_id = (await other.get("/api/group-chats")).json()[0]["id"]
+    turns = (await detail(other, group_id))["turns"]
+    assert turns[1]["messages"][0]["reply_to"] == turns[0]["messages"][1]["id"]
+    assert turns[1]["messages"][0]["reply_to"] != quoted["id"]
+
+
 async def test_multiple_mentions_answer_independently_before_the_others(
     make_client: ClientFactory, characters: CharacterConfig,
 ):
@@ -132,13 +185,21 @@ async def test_clear_address_is_a_mention_and_a_reference_stays_group_wide(make_
 
 
 async def test_photo_belongs_to_the_addressed_speaker_and_moves_with_the_group(
-    make_client: ClientFactory, settings: Settings, tmp_path: Path,
+    make_client: ClientFactory, settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     image = FakeImageService()
     image.gate = asyncio.Event()
-    llm = FakeLLM(PHOTO_REPLY, PHOTO_REPLY)
+    llm = FakeLLM(['{"members":["mano"]}'], PHOTO_REPLY, PHOTO_REPLY)
     configured = replace(settings, image=IMAGE, judge=FAKE_JUDGE)
-    client = make_client(llm, settings=configured, clients=asking(), image_transport=image.transport())
+    clients = asking()
+    answer = clients.judge.answer
+
+    async def judge_photo_clause(key, state, questions):
+        clients.judge.photo = float("自拍" in state[SAID])
+        return await answer(key, state, questions)
+
+    monkeypatch.setattr(clients.judge, "answer", judge_photo_clause)
+    client = make_client(llm, settings=configured, clients=clients, image_transport=image.transport())
     group = await create(client)
     sent = await events(client, group, body(text="@月岡恋鐘 说说排练，@櫻木真乃 发张自拍"))
     replies = [e["message"] for e in sent if e["type"] == "message"][1:]
@@ -169,6 +230,91 @@ async def test_photo_belongs_to_the_addressed_speaker_and_moves_with_the_group(
 
     assert (await client.delete(f"/api/group-chats/{group}")).status_code == 204
     assert (await client.get(f"/api/photos/{photo_id}/image")).status_code == 404
+
+
+async def test_group_photo_uses_distinct_character_prompts(
+    make_client: ClientFactory, settings: Settings, characters: CharacterConfig,
+):
+    characters.add("hiori", "風野灯織", "灯織。", photo=("kazano hiori", "black hair, blue eyes"))
+    image = FakeImageService()
+    llm = FakeLLM(['{"members":null}'], PHOTO_REPLY, HIORI)
+    client = make_client(llm, settings=replace(settings, image=IMAGE, judge=FAKE_JUDGE),
+                         clients=asking(), image_transport=image.transport())
+    group = await create(client, ["mano", "hiori"])
+    sent = await events(client, group, body(text="给我拍一张大家的合照"))
+    photo = next(e["message"]["photo"] for e in sent if e["type"] == "message" and e["message"]["photo"])
+    assert (await settled(client, photo["id"]))["status"] == "ready"
+    body_sent = image.requests[0]["body"]
+    captions = body_sent["parameters"]["v4_prompt"]["caption"]["char_captions"]
+    assert len(captions) == 2
+    assert "sakuragi mano" in captions[0]["char_caption"]
+    assert "kazano hiori" in captions[1]["char_caption"]
+    assert "2girls" in body_sent["input"] and "solo" not in body_sent["input"]
+
+
+async def test_group_photo_can_be_sent_by_someone_outside_the_requested_cast(
+    make_client: ClientFactory, settings: Settings, characters: CharacterConfig,
+):
+    characters.add("hiori", "風野灯織", "灯織。", photo=("kazano hiori", "black hair, blue eyes"))
+    image = FakeImageService()
+    llm = FakeLLM(['{"members":["mano","hiori"]}'], PHOTO_REPLY, MANO, HIORI)
+    client = make_client(llm, settings=replace(settings, image=IMAGE, judge=FAKE_JUDGE),
+                         clients=asking(), image_transport=image.transport())
+    group = await create(client, ["mano", "kogane", "hiori"])
+    sent = await events(client, group, body(text="@月岡恋鐘 发一张真乃和灯織的合照"))
+    [sender] = [e["message"] for e in sent if e["type"] == "message" and e["message"]["photo"]]
+    assert sender["character_id"] == "kogane"
+    assert (await settled(client, sender["photo"]["id"]))["status"] == "ready"
+    captions = image.requests[0]["body"]["parameters"]["v4_prompt"]["caption"]["char_captions"]
+    assert len(captions) == 2
+    assert "sakuragi mano" in captions[0]["char_caption"]
+    assert "kazano hiori" in captions[1]["char_caption"]
+
+
+async def test_group_photo_can_show_an_object_without_people(make_client: ClientFactory, settings: Settings):
+    image = FakeImageService()
+    tagged = [PHOTO_REPLY[0].replace("peace sign, smile", "bouquet"), PHOTO_REPLY[1]]
+    client = make_client(FakeLLM(['{"subject":"object"}'], tagged, MANO),
+                         settings=replace(settings, image=IMAGE, judge=FAKE_JUDGE),
+                         clients=asking(), image_transport=image.transport())
+    group = await create(client)
+    sent = await events(client, group, body("kogane", "只拍桌上的花束"))
+    [photo] = [e["message"]["photo"] for e in sent if e["type"] == "message" and e["message"]["photo"]]
+    assert (await settled(client, photo["id"]))["status"] == "ready"
+    request = image.requests[0]["body"]
+    assert "bouquet" in request["input"] and "no humans" in request["input"]
+    assert request["parameters"]["v4_prompt"]["caption"]["char_captions"] == []
+
+
+@pytest.mark.parametrize("image_settings", [
+    replace(IMAGE, api_format="openai"),
+    replace(IMAGE, model="nai-diffusion-3"),
+])
+async def test_group_photo_requires_a_compatible_service(
+    make_client: ClientFactory, settings: Settings, characters: CharacterConfig, image_settings,
+):
+    characters.add("hiori", "風野灯織", "灯織。", photo=("kazano hiori", "black hair, blue eyes"))
+    image = FakeImageService()
+    llm = FakeLLM(['{"members":null}'], PHOTO_REPLY, HIORI)
+    client = make_client(llm, settings=replace(settings, image=image_settings, judge=FAKE_JUDGE),
+                         clients=asking(), image_transport=image.transport())
+    group = await create(client, ["mano", "hiori"])
+    sent = await events(client, group, body(text="拍张大家的合照"))
+    assert sent[-1]["status"] == "done" and "不支持多人合照" in sent[-1]["detail"]
+    assert not image.requests
+
+
+async def test_group_photo_missing_appearance_is_explained_without_generating(
+    make_client: ClientFactory, settings: Settings,
+):
+    image = FakeImageService()
+    llm = FakeLLM(['{"members":null}'], MANO, KOGANE)
+    client = make_client(llm, settings=replace(settings, image=IMAGE, judge=FAKE_JUDGE),
+                         clients=asking(), image_transport=image.transport())
+    group = await create(client)
+    sent = await events(client, group, body(text="拍张大家的合照"))
+    assert "外貌资料" in sent[-1]["detail"]
+    assert not image.requests
 
 
 async def test_failure_preserves_committed_messages_and_refunds_only_when_none_was_saved(
@@ -296,7 +442,7 @@ async def test_group_data_package_round_trip_and_account_deletion(
     await events(client, group, body("kogane"))
     package = await export(client, "conversations")
     _, manifest, data = unzipped(package)
-    assert manifest["format"] == 8 and manifest["counts"]["conversations"] == 1
+    assert manifest["format"] == 9 and manifest["counts"]["conversations"] == 1
     assert data["group_chats"][0]["members"] == MEMBERS
 
     other = other_deployment(make_client, settings, tmp_path)

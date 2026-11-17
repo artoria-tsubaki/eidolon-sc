@@ -48,11 +48,12 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
   const [reload, setReload] = useState(0);
   const [text, setText] = useState("");
   const [mentions, setMentions] = useState<string[]>([]);
+  const [quoted, setQuoted] = useState<GroupMessage | null>(null);
   const [sending, setSending] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const active = useRef<AbortController | null>(null);
-  const pending = useRef<{ text: string; mentions: string[]; request: string } | null>(null);
+  const pending = useRef<{ text: string; mentions: string[]; quote: string | null; request: string } | null>(null);
   const running = log.turns.at(-1)?.status === "running";
   const byId = new Map(characters?.map((c) => [c.id, c]));
 
@@ -106,19 +107,20 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
     let completed = false;
     let accepted = false;
     let request = pending.current;
-    if (!request || request.text !== value || request.mentions !== mentions) {
-      request = { text: value, mentions, request: newGroupRequestId() };
+    if (!request || request.text !== value || request.mentions !== mentions || request.quote !== (quoted?.id ?? null)) {
+      request = { text: value, mentions, quote: quoted?.id ?? null, request: newGroupRequestId() };
       pending.current = request;
     }
     setSending(true);
     setError(null);
     try {
-      for await (const event of sendGroupTurn(id, userId, value, mentions, request.request, controller.signal)) {
+      for await (const event of sendGroupTurn(id, userId, value, mentions, request.request, controller.signal, request.quote)) {
         if (event.type === "message" && event.message.character_id === null && !accepted) {
           accepted = true;
           pending.current = null;
           setText("");
           setMentions([]);
+          setQuoted(null);
         }
         if (event.type === "done") {
           completed = true;
@@ -186,6 +188,7 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
 
   const busy = sending || running || deleting;
   const memberName = (id: string) => byId.get(id)?.name ?? id;
+  const messagesById = new Map(log.turns.flatMap((turn) => turn.messages.map((message) => [message.id, message] as const)));
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-background">
@@ -230,7 +233,10 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
                 {log.turns.flatMap((turn) => [
                   ...turn.messages.map((message) =>
                     <GroupBubble key={message.id} message={message} character={byId.get(message.character_id ?? "")}
-                      mentions={message.character_id === null ? groupMentions(turn).map(memberName) : []} />),
+                      mentions={message.character_id === null ? groupMentions(turn).map(memberName) : []}
+                      quoted={message.reply_to ? messagesById.get(message.reply_to) : undefined}
+                      quoteName={message.reply_to ? memberName(messagesById.get(message.reply_to)?.character_id ?? "") : ""}
+                      onQuote={!busy && message.character_id ? () => setQuoted(message) : undefined} />),
                   ...(log.draft?.turnId === turn.id
                     ? [<GroupBubble key={log.draft.message.id} message={log.draft.message}
                         character={byId.get(log.draft.message.character_id ?? "")} mentions={[]} />]
@@ -238,6 +244,13 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
                   ...(turn.status === "failed" || turn.status === "interrupted"
                     ? [<MessageScrollerItem key={`status-${turn.id}`}>
                         <p className="text-center text-meta text-muted-foreground">{t.interrupted}</p>
+                        {turn.messages[0]?.reply_to && <div className="flex justify-center">
+                          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => {
+                            setText(turn.messages[0].text ?? "");
+                            setQuoted(messagesById.get(turn.messages[0].reply_to ?? "") ?? null);
+                            setMentions(groupMentions(turn));
+                          }}>重试引用追问</Button>
+                        </div>}
                       </MessageScrollerItem>]
                     : []),
                 ])}
@@ -257,6 +270,10 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
 
       <form onSubmit={(event) => void send(event)} className="flex shrink-0 flex-col gap-2 border-t border-border px-3 py-2">
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {quoted && <div className="flex items-center gap-2 text-meta text-muted-foreground">
+          <span className="min-w-0 flex-1 truncate">引用 {memberName(quoted.character_id ?? "")}：{quoted.segments.map((s) => s.zh || s.ja).join(" ")}</span>
+          <Button type="button" variant="ghost" size="icon" aria-label="取消引用" onClick={() => setQuoted(null)}><XIcon /></Button>
+        </div>}
         {mentions.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {mentions.map((member) => (
@@ -332,8 +349,9 @@ function GroupPhotoAttachment({ photo }: { photo: Photo }) {
   return <PhotoBlock photo={photo.status === "pending" && outcome ? { ...photo, ...outcome } : photo} />;
 }
 
-function GroupBubble({ message, character, mentions }: {
+function GroupBubble({ message, character, mentions, quoted, quoteName, onQuote }: {
   message: GroupMessage; character: Character | undefined; mentions: string[];
+  quoted?: GroupMessage; quoteName?: string; onQuote?: () => void;
 }) {
   const producer = message.character_id === null;
   const name = character?.name ?? message.character_id ?? t.producer;
@@ -345,11 +363,13 @@ function GroupBubble({ message, character, mentions }: {
             <div className="flex min-w-0 items-center gap-2">
               <MarkedAvatar size="bubble" name={name} src={character?.avatar_url} />
               <span className="truncate text-meta font-medium text-muted-foreground">{name}</span>
+              {onQuote && <Button type="button" variant="ghost" size="sm" onClick={onQuote}>引用</Button>}
             </div>
           )}
           {message.photo && <GroupPhotoAttachment key={message.photo.id} photo={message.photo} />}
           <Bubble variant={producer ? "producer" : "her"} align={producer ? "end" : "start"}>
             <BubbleContent>
+              {quoted && <p className="text-meta text-muted-foreground">引用 {quoteName}：{quoted.segments.map((s) => s.zh || s.ja).join(" ")}</p>}
               {producer ? (
                 <p className="whitespace-pre-wrap text-body">{mentions.length ? mentions.map((name) => "@" + name).join(" ") + " " : ""}{message.text}</p>
               ) : message.segments.map((segment, index) => (
