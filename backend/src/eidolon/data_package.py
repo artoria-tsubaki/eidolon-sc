@@ -47,6 +47,7 @@ from eidolon.letter_prompt import Occasion, Paragraph, Written
 from eidolon.letters import Carried as CarriedLetter
 from eidolon.letters import add_carried as add_carried_letters
 from eidolon.letters import read_carried as read_carried_letters
+from eidolon.group_chats import GroupTurn, add_packaged_group, group_photo_image, packaged_groups
 from eidolon.memory import (
     MAX_MEMORY_LENGTH,
     CarriedMemory,
@@ -82,11 +83,11 @@ from eidolon.store import (
     write_profile,
 )
 
-FORMAT = 6
+FORMAT = 8
 """The newest format this version reads, and the one it exports. Changing the format adds
 one to it, and keeps reading the older ones: 2 added her reach-outs (`reach_outs`), 3 her
 being unwell among the events (`unwell`) and the periods the user wrote down (`cycles`), 4
-the producer's city in the profile (`city`), 5 the letters she wrote (`letters`)."""
+the producer's city in the profile (`city`), 5 letters, 6 user images, 7 group chats, 8 multiple mentions and group photos."""
 
 REACH_OUTS_SINCE = 2
 """The format whose conversations first held her reach-outs: before it, none may."""
@@ -627,11 +628,65 @@ class PackagedLetter(_Strict):
         )
 
 
+class PackagedGroup(_Strict):
+    members: list[str] = Field(min_length=2, max_length=3)
+    created_at: Time
+    turns: list[GroupTurn]
+    photos: dict[str, PackagedPhoto] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _valid_turns(self) -> "PackagedGroup":
+        if len(set(self.members)) != len(self.members):
+            raise ValueError("repeated group member")
+        messages: set[str] = set()
+        photo_attachments: set[str] = set()
+        for turn in self.turns:
+            targets = turn.targets
+            if (not 1 <= len(turn.messages) <= len(self.members) + 1
+                or len(set(targets)) != len(targets) or any(id not in self.members for id in targets)
+            ):
+                raise ValueError("invalid group turn")
+            user, *replies = turn.messages
+            if user.character_id is not None or not user.text or len(user.text) > 2000 or user.segments:
+                raise ValueError("invalid group user message")
+            speakers = [reply.character_id for reply in replies]
+            if (len(set(speakers)) != len(speakers)
+                or any(speaker not in self.members for speaker in speakers)
+                or any(reply.text is not None or not reply.segments for reply in replies)
+                or (turn.status == "done" and not replies)
+                or (turn.status == "failed" and replies)
+            ):
+                raise ValueError("invalid group reply")
+            for message in turn.messages:
+                if message.id in messages or message.photo is not None:
+                    raise ValueError("invalid group message ID or photo metadata")
+                messages.add(message.id)
+                message.created_at = _stored_time(message.created_at)
+            with_photo = {reply.id for reply in replies if reply.id in self.photos}
+            if len(with_photo) > 1:
+                raise ValueError("multiple group photos in one turn")
+            photo_attachments.update(with_photo)
+        if photo_attachments != self.photos.keys():
+            raise ValueError("group photo without a reply")
+        return self
+
+
+def _packaged_group(
+    members: list[str], created_at: str, turns: list[GroupTurn], photos: Mapping[str, KeptPhoto],
+) -> PackagedGroup:
+    for turn in turns:
+        for message in turn.messages:
+            message.photo = None
+    return PackagedGroup(members=members, created_at=created_at, turns=turns,
+                         photos={id: PackagedPhoto.of(photo) for id, photo in photos.items()})
+
+
 class PackageData(_Strict):
     """`data.json`: a key for each category the package holds, none for the others."""
 
     profile: PackagedProfile | None = None
     conversations: list[PackagedConversation] | None = None
+    group_chats: list[PackagedGroup] | None = None
     memories: list[PackagedMemory] | None = None
     cycles: list[PackagedCycle] | None = None
     letters: list[PackagedLetter] | None = None
@@ -655,7 +710,10 @@ class PackageData(_Strict):
 
     def photos(self) -> list[PackagedPhoto]:
         """The photos she sent in all its conversations."""
-        return [p for c in self.conversations or [] for p in c.photos()]
+        return [
+            *(p for c in self.conversations or [] for p in c.photos()),
+            *(p for group in self.group_chats or [] for p in group.photos.values()),
+        ]
 
     @model_validator(mode="after")
     def _memories_superseded_by_memories(self) -> "PackageData":
@@ -711,6 +769,8 @@ class Imported:
     """Only those not here already: of her, written at the same time."""
     letters_skipped: int = 0
     """The letters not imported, of characters not here."""
+    group_chats: int = 0
+    group_chats_skipped: int = 0
 
 
 def chosen(include: Iterable[Category]) -> list[Category]:
@@ -743,12 +803,14 @@ class DataPackages:
         characters: Mapping[str, Character],
         gift_catalog: Mapping[str, Gift],
         clock: Callable[[], datetime],
+        group_member: Callable[[str], bool],
     ) -> None:
         self._db = db
         self._store = store
         self._memories = memories
         self._characters = characters
         self._gift_catalog = gift_catalog
+        self._group_member = group_member
         self._clock = clock
         self._working: set[str] = set()
         """Whose packages are being imported or exported; on the event loop only."""
@@ -782,15 +844,19 @@ class DataPackages:
         but the pictures of their photos read at once, then written on a thread, reading
         the pictures one at a time."""
         categories = chosen(include)
-        profile, conversations, memories, cycles, letters = await self._db.read(
+        profile, conversations, memories, cycles, letters, groups = await self._db.read(
             self._read_data, user_id, categories
         )
         loop = asyncio.get_running_loop()
 
+        async def read_picture(photo_id: str) -> bytes | None:
+            return (await self._store.photo_image(photo_id, user_id)
+                    or await self._db.read(group_photo_image, photo_id, user_id))
+
         def picture_of(photo_id: str) -> bytes | None:
             """The photo's picture, read as the package is written, on a thread."""
             reading = asyncio.run_coroutine_threadsafe(
-                self._store.photo_image(photo_id, user_id), loop
+                read_picture(photo_id), loop
             )
             try:
                 return reading.result(timeout=PICTURE_WAIT)
@@ -799,7 +865,7 @@ class DataPackages:
                 raise
 
         await asyncio.to_thread(
-            self._export, categories, profile, conversations, memories, cycles, letters,
+            self._export, categories, profile, conversations, memories, cycles, letters, groups,
             picture_of, to,
         )
 
@@ -811,6 +877,7 @@ class DataPackages:
         list[Memory],
         list[cycle_records.Carried],
         list[CarriedLetter],
+        list[PackagedGroup],
     ]:
         """What of the categories the user has, read through `db`, but the pictures of their
         photos: their profile, conversations, memories, the periods they wrote down and the
@@ -821,6 +888,8 @@ class DataPackages:
             self._memories.read_kept(db, user_id) if "memories" in categories else [],
             cycle_records.read_carried(db, user_id) if "cycles" in categories else [],
             read_carried_letters(db, user_id) if "letters" in categories else [],
+            [_packaged_group(m, at, t, photos) for m, at, t, photos in
+             packaged_groups(db, user_id, "photos" in categories)] if "conversations" in categories else [],
         )
 
     def _export(
@@ -831,6 +900,7 @@ class DataPackages:
         memories: list[Memory],
         cycles: list[cycle_records.Carried],
         letters: list[CarriedLetter],
+        groups: list[PackagedGroup],
         picture_of: Callable[[str], bytes | None],
         to: Path,
     ) -> None:
@@ -844,7 +914,9 @@ class DataPackages:
                 PackagedConversation.of(c, self._name(c.character_id), "photos" in categories)
                 for c in conversations
             ]
-            counts["conversations"] = len(data.conversations)
+            if groups:
+                data.group_chats = groups
+            counts["conversations"] = len(data.conversations) + len(groups)
         if "photos" in categories:
             counts["photos"] = len(sent(data.photos())) + sum(m.user_image is not None for c in data.conversations or [] for m in c.messages)
         if "memories" in categories:
@@ -903,6 +975,19 @@ class DataPackages:
                     compress_type=zipfile.ZIP_STORED,  # a WebP is compressed already
                 )
 
+        for group in data.group_chats or []:
+            for message, photo in group.photos.items():
+                if not photo.sent:
+                    continue
+                picture = picture_of(photo.id)
+                if picture is None:
+                    group.photos[message] = photo.not_sent()
+                    continue
+                package.writestr(
+                    zipfile.ZipInfo(_picture_entry(photo.id), _zip_time(now)), picture,
+                    compress_type=zipfile.ZIP_STORED,
+                )
+
     async def import_(
         self,
         user_id: str,
@@ -941,6 +1026,13 @@ class DataPackages:
             self._unpack_conversations(
                 data.conversations, unpacked, with_photos="photos" in categories
             )
+            for group in data.group_chats or []:
+                if all(map(self._group_member, group.members)):
+                    unpacked.group_chats.append(
+                        group if "photos" in categories else group.model_copy(update={"photos": {}})
+                    )
+                else:
+                    unpacked.group_chats_skipped += 1
         if "memories" in categories and data.memories is not None:
             unpacked.memories = data.memories
         if "cycles" in categories and data.cycles is not None:
@@ -999,6 +1091,8 @@ class _Unpacked:
     """The picture of each photo sent, by its id in the package; none without photos."""
     profile: ProducerProfile | None = None
     conversations: list[_Carried] = field(default_factory=list)
+    group_chats: list[PackagedGroup] = field(default_factory=list)
+    group_chats_skipped: int = 0
     skipped: list[Skipped] = field(default_factory=list)
     memories: list[PackagedMemory] = field(default_factory=list)
     cycles: list[cycle_records.Carried] = field(default_factory=list)
@@ -1044,6 +1138,13 @@ def _write_import(
         if new:
             imported.conversations += 1
             imported.photos += carried.photos
+    imported.group_chats_skipped = unpacked.group_chats_skipped
+    for group in unpacked.group_chats:
+        if add_packaged_group(db, user_id, group.members, group.created_at, group.turns,
+                              {id: photo.kept() for id, photo in group.photos.items()},
+                              unpacked.pictures.__getitem__):
+            imported.group_chats += 1
+            imported.photos += len(sent(list(group.photos.values())))
     if unpacked.memories:
         imported.memories = add_carried(
             db, user_id, [m.carried(here) for m in unpacked.memories]
@@ -1106,6 +1207,14 @@ def _read(zipped: zipfile.ZipFile) -> tuple[Manifest, PackageData, dict[str, byt
             raise BrokenPackage("letters in a format before them")
         listed = set(manifest.categories)
         held = {c for c in CATEGORIES if c != "photos" and getattr(data, c) is not None}
+        if data.group_chats is not None and (manifest.format < 7 or "conversations" not in listed):
+            raise BrokenPackage("group chats without format 7 and conversations category")
+        if manifest.format < 8 and any(
+            group.photos or any(turn.mentioned_ids is not None or len(turn.messages) > 3
+                                for turn in group.turns)
+            for group in data.group_chats or []
+        ):
+            raise BrokenPackage("extended group chat before format 8")
         photos = data.photos()
         user_images = [m for c in data.conversations or [] for m in c.messages if m.user_image]
         if user_images and (manifest.format < 6 or "photos" not in listed):

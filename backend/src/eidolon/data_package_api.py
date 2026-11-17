@@ -135,7 +135,11 @@ def add_data_package_routes(app: FastAPI, backend: Backend) -> None:
             raise
         finally:
             path.unlink(missing_ok=True)
-        return asdict(imported)
+        result = asdict(imported)
+        for key in ("group_chats", "group_chats_skipped"):
+            if not result[key]:
+                del result[key]
+        return result
 
     @app.exception_handler(TooNew)
     async def too_new(_: Request, e: TooNew) -> JSONResponse:

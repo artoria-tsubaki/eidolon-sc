@@ -55,9 +55,14 @@ async def leave_turn(
     Closing `client.stream(...)` early never reaches the app: httpx's ASGITransport runs
     the app to the end first. So this drives the app as uvicorn does, on ASGI spec 2.3,
     where the streaming response listens for `http.disconnect` and cancels the stream."""
-    request = client.build_request(
-        "POST", f"/api/conversations/{conversation_id}/turns", json={"text": text}
+    return await disconnect_after(
+        client, f"/api/conversations/{conversation_id}/turns", {"text": text}, after,
     )
+
+
+async def disconnect_after(client: httpx.AsyncClient, path: str, body: dict, after: str) -> list[dict]:
+    """Drive the stream at the ASGI boundary and disconnect after the designated event."""
+    request = client.build_request("POST", path, json=body)
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},

@@ -25,6 +25,7 @@ import { PreviewText } from "./PreviewText";
 import { ServiceStatusButton } from "./ServiceStatusButton";
 import { useDirectory, type CallInList } from "./ConversationDirectory";
 import { ListFilter } from "./ListFilter";
+import { GroupChatRows, NewGroupChat } from "./GroupChatDirectory";
 import { useCallTime } from "./useCallTime";
 
 const t = copy.conversationList;
@@ -37,7 +38,10 @@ const t = copy.conversationList;
  * 但搜索时照样能搜到，当前打开的和正在通话的始终留下。一整列不按组合分段，换位置时直接跳过去、不做动画。
  * 列表栏是实底，不在她的子树里。宽屏时在左栏，窄屏时占满一页。
  */
-export function ConversationList({ selectedId }: { selectedId: string | null }) {
+export function ConversationList({ selectedId, selectedGroup }: {
+  selectedId: string | null;
+  selectedGroup: string | null;
+}) {
   const { account, characters, latest, preferences, tidy, failure, reload, call, go, onScreen } = useDirectory();
   const now = useMinute();
   const [query, setQuery] = useState("");
@@ -54,6 +58,7 @@ export function ConversationList({ selectedId }: { selectedId: string | null }) 
     <div className="flex h-full flex-col bg-background text-foreground">
       <header className="flex shrink-0 items-center gap-2 pt-3 pr-2 pb-2 pl-4">
         <h1 className="flex-1 text-list-title">{t.title}</h1>
+        <NewGroupChat />
         <LetterButton />
         <ServiceStatusButton />
         <Announcements userId={account?.id ?? null} />
@@ -75,6 +80,7 @@ export function ConversationList({ selectedId }: { selectedId: string | null }) 
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        <GroupChatRows query={query} selected={selectedGroup} />
         {failure ? (
           <Empty>
             <EmptyHeader>

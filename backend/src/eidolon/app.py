@@ -29,7 +29,7 @@ from eidolon.call import (
 from eidolon.characters import Character, ScriptedLine, in_idol_order, signature_url
 from eidolon.config import FishAudioModel
 from eidolon.database import by_name, readable
-from eidolon.engine import ENDED, TurnJudged, shown
+from eidolon.engine import ENDED, MAX_INPUT_LENGTH, TurnJudged, shown
 from eidolon.user_images import ImageTurn, UserImages, InvalidImage, LimitedVision, MAX_BYTES
 from eidolon.greetings import (
     LANDING_MEMORY_STILL_PATH,
@@ -74,6 +74,9 @@ from eidolon.cycles_api import add_cycle_routes
 from eidolon.letters_api import add_letter_routes
 from eidolon.moments_api import add_moment_routes
 from eidolon.gifts_api import add_gift_routes
+from eidolon.group_chats import (
+    BadGroup, GroupBusy, GroupDetail, GroupMissing, GroupSummary, GroupTurn, RequestConflict,
+)
 from eidolon.invites_api import add_invite_routes
 from eidolon.photos_api import add_photo_routes
 from eidolon.schedule_api import add_schedule_routes
@@ -148,6 +151,18 @@ class TurnInput(BaseModel):
     """The model of the user's own key for speech synthesis, where their browser keeps one,
     but not the key: her reply is written with delivery cues as the model it would be read
     aloud with reads them (GLOSSARY.md「朗读」), the deployer's without it."""
+
+
+class NewGroupChat(BaseModel):
+    member_ids: list[str] = Field(min_length=2, max_length=3)
+
+
+class GroupTurnInput(BaseModel):
+    text: str
+    mention_ids: list[str] | None = Field(default=None, max_length=3)
+    mention_id: str | None = None
+    request_id: str = Field(min_length=16, max_length=64)
+    own_keys: OwnKeysInput | None = None
 
 
 class ReadAloudInput(BaseModel):
@@ -573,6 +588,7 @@ def create_app(backend: Backend) -> FastAPI:
                 "signature_url": signature_url(c),
                 "stand": _stand(c, backend.settings.stand_assets_url),
                 "idol_id": c.idol_id,
+                "can_join_group": backend.group_chats.can_join(c.id),
                 "short_name": c.short_name,
                 "name_zh": c.name_zh,
                 "name_kana": c.name_kana,
@@ -881,6 +897,69 @@ def create_app(backend: Backend) -> FastAPI:
         conversation = await conversation_or_404(conversation_id, user_id)
         segments = await store.reach_out_said(conversation.id, reach_out_id)
         return await read_aloud(conversation, segments, body, user_id)
+
+    groups = backend.group_chats
+
+    @app.exception_handler(GroupMissing)
+    async def group_missing(_: Request, __: GroupMissing) -> JSONResponse:
+        return JSONResponse({"detail": "群聊不存在。"}, status_code=404)
+
+    @app.exception_handler(GroupBusy)
+    async def group_busy(_: Request, __: GroupBusy) -> JSONResponse:
+        return JSONResponse({"detail": "群聊正在回复，请稍候。"}, status_code=409)
+
+    @app.exception_handler(RequestConflict)
+    async def group_request_conflict(_: Request, __: RequestConflict) -> JSONResponse:
+        return JSONResponse({"detail": "请求标识已用于另一条消息。"}, status_code=409)
+
+    @app.exception_handler(BadGroup)
+    async def bad_group(_: Request, error: BadGroup) -> JSONResponse:
+        return JSONResponse({"detail": str(error)}, status_code=422)
+
+    @app.get("/api/group-chats")
+    async def list_groups(user_id: UserId) -> list[GroupSummary]:
+        return await groups.summaries(user_id)
+
+    @app.post("/api/group-chats", status_code=201)
+    async def create_group(body: NewGroupChat, user_id: UserId) -> GroupSummary:
+        return await groups.create(user_id, body.member_ids)
+
+    @app.get("/api/group-chats/{group_id}")
+    async def group_detail(group_id: str, user_id: UserId) -> GroupDetail:
+        return await groups.read(user_id, group_id)
+
+    @app.delete("/api/group-chats/{group_id}", status_code=204)
+    async def delete_group(group_id: str, user_id: UserId) -> Response:
+        await groups.delete(user_id, group_id)
+        return Response(status_code=204)
+
+    @app.post("/api/group-chats/{group_id}/turns")
+    async def group_turn(
+        group_id: str, body: GroupTurnInput, user_id: UserId, device_timezone: DeviceTimezone = None,
+    ) -> StreamingResponse:
+        text = body.text.strip()
+        if not 1 <= len(text) <= MAX_INPUT_LENGTH:
+            raise BadGroup(f"请输入 1 至 {MAX_INPUT_LENGTH} 字的消息。")
+        brought = body.own_keys.brought() if body.own_keys else BroughtKeys()
+        if body.mention_id is not None and body.mention_ids is not None:
+            raise BadGroup("请只提交一份点名名单。")
+        mentions = body.mention_ids if body.mention_ids is not None else (
+            [body.mention_id] if body.mention_id is not None else []
+        )
+        run = await groups.begin(user_id, group_id, body.request_id, mentions,
+                                 text, brought, device_timezone)
+        if isinstance(run, GroupTurn):
+            async def replay() -> AsyncIterator[str]:
+                for message in run.messages:
+                    yield _sse({"type": "message", "turn_id": run.id, "message": message.model_dump(),
+                                "mentioned_ids": run.targets})
+                yield _sse({"type": "done", "turn_id": run.id, "status": run.status, "detail": None})
+            return StreamingResponse(replay(), media_type="text/event-stream")
+
+        async def events() -> AsyncIterator[str]:
+            async for event in run.events:
+                yield _sse(event)
+        return _TurnResponse(events(), run.end)
 
     return app
 

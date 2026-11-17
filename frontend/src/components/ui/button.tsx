@@ -59,6 +59,8 @@ const buttonVariants = cva(
         "icon-sm":
           "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
         "icon-lg": "size-9",
+        // eidolon: 群聊输入栏和单行输入框一样高的触控按钮。
+        "icon-composer": "size-11",
         // eidolon: 通话层用的尺寸。call 44px 高，手机上也够触控下限；call-sm 是电脑上头部的「只看文字」。
         call: "h-11 gap-2 px-5",
         "call-sm": "h-9 gap-1.5 px-3",

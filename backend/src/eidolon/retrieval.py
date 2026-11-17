@@ -26,7 +26,7 @@ the candidates the turn needs are reranked, so no more often than if the turn ha
 waited: the references' and the memories', the memories' alone, or the story's with the
 work facts' lives and releases to recall. A turn needing nothing drops them, and
 whatever is still being looked up. The vector goes on to the writing down, which shows
-the background model the memories nearest the same query (`MemoryTurn.write_down`).
+the background model the memories nearest the same query (`ReadMemories.write_down`).
 
 Retrieval never fails a turn, nor holds it up for long: embedding and reranking are given
 a few seconds and asked again once (`retry`). If the judge model cannot answer, the turn
@@ -68,7 +68,7 @@ from eidolon.judge import (
     turn_state,
 )
 from eidolon.llm import Tool
-from eidolon.memory import Memory, MemoryTurn, memory_query
+from eidolon.memory import Memory, ReadMemories, memory_query
 from eidolon.photo_judge import QUESTIONS as PHOTO_QUESTIONS
 from eidolon.photo_judge import read_asked
 from eidolon.references import Reference, ReferenceKind, ReferenceSource
@@ -299,7 +299,7 @@ class Retrieved:
     photo: bool = False
     """Whether the user asks her for a photo, asked about it; no if it could not be told."""
     query_vector: list[float] | None = None
-    """The turn's query embedded, for writing down (`MemoryTurn.write_down`); None if it
+    """The turn's query embedded, for writing down (`ReadMemories.write_down`); None if it
     was not by the time the turn knew what it needed, or could not be."""
 
 
@@ -335,7 +335,7 @@ class Retrieval:
         character: Character,
         history: Sequence[Message],
         text: str,
-        memory: MemoryTurn | None = None,
+        memory: ReadMemories | None = None,
         affinity: bool = False,
         photo: bool = False,
         days: Days | None = None,
@@ -383,7 +383,7 @@ class Retrieval:
         self,
         character: Character,
         embedding: "asyncio.Future[list[float] | None]",
-        memory: MemoryTurn | None,
+        memory: ReadMemories | None,
     ) -> _Found | None:
         """The candidates for the turn's query, once `embedding` it is done; None if it
         cannot be embedded."""
@@ -409,7 +409,7 @@ class Retrieval:
         text: str,
         query: str,
         found: _Found | None,
-        memory: MemoryTurn | None,
+        memory: ReadMemories | None,
         need: Need,
     ) -> Retrieved:
         """What the turn `need`s (something) of what it found for `query`, `text` and her
@@ -535,13 +535,13 @@ def _log_failure(task: "asyncio.Future[Any]") -> None:
 
 
 async def _memory_candidates(
-    memory: MemoryTurn | None, query_vector: Sequence[float]
+    memory: ReadMemories | None, query_vector: Sequence[float]
 ) -> list[Memory]:
     return await memory.candidates(query_vector) if memory else []
 
 
 async def _find_memories(
-    memory: MemoryTurn | None, query: str, candidates: Sequence[Memory]
+    memory: ReadMemories | None, query: str, candidates: Sequence[Memory]
 ) -> str | None:
     return await memory.find(query, candidates) if memory else None
 

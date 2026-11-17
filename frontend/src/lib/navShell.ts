@@ -22,6 +22,10 @@ function pathOf(href: string): { path: string; local: boolean } {
 }
 
 /** Whose conversation page this path is, or null if it is not one. */
+function isGroupChat(path: string): boolean {
+  return /^\/group-chat\/[^/]+\/?$/.test(path);
+}
+
 function conversationOf(path: string): string | null {
   const match = /^\/conversation\/([^/]+)\/?$/.exec(path);
   return match ? decodeURIComponent(match[1]) : null;
@@ -29,7 +33,8 @@ function conversationOf(path: string): string | null {
 
 /** Whether `href` is a character's conversation page (her letter does not pop up over it, lib/letter). */
 export function isConversationPage(href: string): boolean {
-  return conversationOf(pathOf(href).path) !== null;
+  const { path } = pathOf(href);
+  return conversationOf(path) !== null || isGroupChat(path);
 }
 
 /** The play page: its first level and each of its subpages. */
@@ -46,6 +51,7 @@ export function isInShell(href: string): boolean {
   return (
     path === "/conversations" ||
     conversationOf(path) !== null ||
+    isGroupChat(path) ||
     path === MOMENTS ||
     isPlay(path) ||
     path === "/settings" ||

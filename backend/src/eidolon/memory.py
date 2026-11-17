@@ -235,6 +235,11 @@ class Memories:
         await self._settle(conversation.user_id)
         return MemoryTurn(self, conversation, timezone, clearings, llm, hold)
 
+    async def for_group(self, user: str, character: str, timezone: str) -> "ReadMemories":
+        """Look up the user's shared memories for this speaker, without a write handle."""
+        await self._settle(user)
+        return ReadMemories(self, user, character, timezone)
+
     async def entries(self, user_id: str) -> list[Memory]:
         """All of the user's memories, newest first, including what their turns so far
         are writing down (unless that takes too long). Not named `list`, which would
@@ -343,13 +348,13 @@ class Memories:
 
     async def _find(
         self,
-        conversation: Conversation,
+        character_id: str,
         timezone: str,
         query_text: str,
         candidates: Sequence[Memory],
     ) -> str | None:
         found = await self._relevant(query_text, candidates)
-        character = self._characters[conversation.character_id]
+        character = self._characters[character_id]
         return _memories_prompt(found, character, timezone, _FOUND) if found else None
 
     async def _relevant(self, query_text: str, candidates: Sequence[Memory]) -> list[Memory]:
@@ -744,7 +749,23 @@ def _store_vectors(
     )
 
 
-class MemoryTurn:
+class ReadMemories:
+    """The shared memories visible to a speaker, with their source attributed."""
+
+    def __init__(self, memories: Memories, user: str, character: str, timezone: str) -> None:
+        self._memories = memories
+        self._memory_user = user
+        self._memory_character = character
+        self._timezone = timezone
+
+    async def candidates(self, query_vector: Sequence[float]) -> list[Memory]:
+        return await self._memories._candidates(self._memory_user, query_vector)
+
+    async def find(self, query: str, candidates: Sequence[Memory]) -> str | None:
+        return await self._memories._find(self._memory_character, self._timezone, query, candidates)
+
+
+class MemoryTurn(ReadMemories):
     """One turn's use of the user's memories; see `Memories.begin`."""
 
     def __init__(
@@ -756,25 +777,11 @@ class MemoryTurn:
         llm: ChatLLM,
         hold: Callable[[], Callable[[], None]] | None = None,
     ) -> None:
-        self._memories = memories
+        super().__init__(memories, conversation.user_id, conversation.character_id, timezone)
         self._conversation = conversation
-        self._timezone = timezone
         self._clearings = clearings
         self._llm = llm
         self._hold = hold
-
-    async def candidates(self, query_vector: Sequence[float]) -> list[Memory]:
-        """As many as `CANDIDATES` of the user's holding memories nearest the turn's query
-        (see `memory_query`) embedded with the memories' embedder, nearest first, for
-        `find`; none if memory is off or the memories not embedded yet cannot be."""
-        return await self._memories._candidates(self._conversation.user_id, query_vector)
-
-    async def find(self, query: str, candidates: Sequence[Memory]) -> str | None:
-        """The prompt section carrying those of the `candidates` relevant to `query`, the
-        turn's query, most relevant first, each labelled with who it was told to and to be
-        passed on as hearsay when that was someone else; None if none are relevant, memory
-        is off or reranking failed."""
-        return await self._memories._find(self._conversation, self._timezone, query, candidates)
 
     def write_down(
         self,

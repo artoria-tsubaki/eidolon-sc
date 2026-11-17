@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
-from eidolon.activity import ActivityLog, CallEndReason, Recording, Result
+from eidolon.activity import ActivityLog, CallEndReason, RecordKind, Recording, Result
 from eidolon.llm import TurnLLMs
 from eidolon.own_keys import BroughtKeys, CallKeys, OwnKeys, TurnKeys
 from eidolon.usage import OverLimit, UsageLimiter, Use
@@ -151,6 +151,11 @@ class Admissions:
         await self.refuse_while_cooling(user_id, character_id)
         return await self._admit("turn", user_id, character_id, self._own_keys.for_turn(brought))
 
+    async def group_turn(self, user_id: str, brought: BroughtKeys) -> Admission[TurnKeys]:
+        """A group round shares the text limit and has its own activity record."""
+        return await self._admit("turn", user_id, "", self._own_keys.for_turn(brought),
+                                 record_kind="group_turn")
+
     async def call(
         self, user_id: str, character_id: str, brought: BroughtKeys
     ) -> Admission[CallKeys]:
@@ -207,11 +212,12 @@ class Admissions:
             log.error("settling what never began failed", exc_info=error)
 
     async def _admit(
-        self, kind: Admitted, user_id: str, character_id: str, keys: K
+        self, kind: Admitted, user_id: str, character_id: str, keys: K,
+        *, record_kind: RecordKind | None = None,
     ) -> Admission[K]:
         try:
             recording = self._activity.begin(
-                kind, user_id, character_id, own_llm=keys.own_llm, exempt=keys.exempt
+                record_kind or kind, user_id, character_id, own_llm=keys.own_llm, exempt=keys.exempt
             )
             try:
                 use = await self._usage.take(user_id, kind, exempt=keys.exempt)

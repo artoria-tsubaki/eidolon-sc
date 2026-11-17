@@ -13,7 +13,7 @@ export const CATEGORIES = ["conversations", "photos", "memories", "profile", "cy
 export type Category = (typeof CATEGORIES)[number];
 
 /** 这一版能读的最新格式，和后端 `data_package.FORMAT` 一样。 */
-export const FORMAT = 6;
+export const FORMAT = 8;
 
 const MANIFEST = "manifest.json";
 
@@ -135,6 +135,7 @@ export function importSummary(result: DataPackageImported): string {
   const t = copy.settings.dataPackage;
   const counts = [
     result.conversations > 0 && t.count.conversations(result.conversations),
+    result.group_chats && t.count.groupChats(result.group_chats),
     result.photos > 0 && t.count.photos(result.photos),
     result.memories > 0 && t.count.memories(result.memories),
     result.cycles > 0 && t.count.cycles(result.cycles),
@@ -149,7 +150,9 @@ export function importSummary(result: DataPackageImported): string {
     imported += t.skipped(skipped, result.skipped.length > 1);
   }
   if (result.cycles_skipped > 0) imported += t.skippedCycles(result.cycles_skipped);
-  return result.letters_skipped > 0 ? imported + t.skippedLetters(result.letters_skipped) : imported;
+  if (result.letters_skipped > 0) imported += t.skippedLetters(result.letters_skipped);
+  if (result.group_chats_skipped) imported += t.skippedGroups(result.group_chats_skipped);
+  return imported;
 }
 
 /**

@@ -43,6 +43,7 @@ export type Character = {
   stand: Stand | null;
   /** Her idol number in the original; the list comes in their order, those without one last. */
   idol_id: number | null;
+  can_join_group?: boolean;
   /** What the original calls her, the end of her name (真乃), for where there is room for little: the
    * calendar's job blocks; null when not configured, and her name is shown there. */
   short_name: string | null;
@@ -922,6 +923,8 @@ export type DataPackageImported = {
   letters: number;
   /** Those not: of a character not here. */
   letters_skipped: number;
+  group_chats?: number;
+  group_chats_skipped?: number;
 };
 
 /** Import a data package, the file itself as the body, streamed: the categories `include` names
@@ -1082,7 +1085,7 @@ export async function readAloud(said: Said, userId: string): Promise<ArrayBuffer
 }
 
 /** The server-sent events of a response, each as it arrives; a refusal thrown as `json` throws it. */
-async function* serverSentEvents<T>(res: Response): AsyncGenerator<T> {
+export async function* serverSentEvents<T>(res: Response): AsyncGenerator<T> {
   if (!res.ok || !res.body) {
     await json(res);
     return;

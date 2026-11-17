@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { PageShell } from "@/components/app/PageShell";
 import { useWide } from "@/components/conversations/ConversationDirectory";
 import { ConversationList } from "@/components/conversations/ConversationList";
+import { GroupChatDirectory } from "@/components/conversations/GroupChatDirectory";
 import { useSavedSize } from "@/components/conversations/useSavedSize";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useHydrated } from "@/hooks/useHydrated";
@@ -28,40 +29,43 @@ import { cn } from "@/lib/utils";
 export default function ConversationsLayout({ children }: { children: ReactNode }) {
   const wide = useWide();
   const hydrated = useHydrated();
-  const { characterId } = useParams<{ characterId?: string }>();
-  const list = <ConversationList selectedId={wide ? (characterId ?? null) : null} />;
+  const { characterId, groupId } = useParams<{ characterId?: string; groupId?: string }>();
+  const hasDetail = Boolean(characterId || groupId);
+  const list = <ConversationList selectedId={characterId ?? null} selectedGroup={groupId ?? null} />;
 
   return (
-    <PageShell width="full" isScrollable={false} isInShell>
-      {hydrated ? (
-        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-          {wide && (
-            <ListPanel>
-              <nav aria-label={copy.conversationList.title} className="h-full">
-                {list}
-              </nav>
-            </ListPanel>
-          )}
-          {/* 两栏之间的细线（列表栏的 border-r），也是拖动调宽窄的地方。 */}
-          {wide && <ResizableHandle aria-label={copy.conversationList.resize} />}
-          <ResizablePanel id="content" className="min-w-0">
-            <div className="relative h-full">{wide || characterId ? children : list}</div>
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      ) : (
-        // 和上面宽屏的样子一样：上次拖到的宽度（没拖过是 320px）的列表、1px 的线、右栏占满其余；窄屏只露一栏。
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <nav
-            aria-label={copy.conversationList.title}
-            className={cn("h-full w-(--list-width,20rem) shrink-0 max-md:w-full", characterId && "max-md:hidden")}
-          >
-            {list}
-          </nav>
-          <div className="w-px shrink-0 bg-border max-md:hidden" />
-          <div className={cn("relative h-full min-w-0 flex-1", !characterId && "max-md:hidden")}>{children}</div>
-        </div>
-      )}
-    </PageShell>
+    <GroupChatDirectory>
+      <PageShell width="full" isScrollable={false} isInShell>
+        {hydrated ? (
+          <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
+            {wide && (
+              <ListPanel>
+                <nav aria-label={copy.conversationList.title} className="h-full">
+                  {list}
+                </nav>
+              </ListPanel>
+            )}
+            {/* 两栏之间的细线（列表栏的 border-r），也是拖动调宽窄的地方。 */}
+            {wide && <ResizableHandle aria-label={copy.conversationList.resize} />}
+            <ResizablePanel id="content" className="min-w-0">
+              <div className="relative h-full">{wide || hasDetail ? children : list}</div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          // 和上面宽屏的样子一样：上次拖到的宽度（没拖过是 320px）的列表、1px 的线、右栏占满其余；窄屏只露一栏。
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <nav
+              aria-label={copy.conversationList.title}
+              className={cn("h-full w-(--list-width,20rem) shrink-0 max-md:w-full", hasDetail && "max-md:hidden")}
+            >
+              {list}
+            </nav>
+            <div className="w-px shrink-0 bg-border max-md:hidden" />
+            <div className={cn("relative h-full min-w-0 flex-1", !hasDetail && "max-md:hidden")}>{children}</div>
+          </div>
+        )}
+      </PageShell>
+    </GroupChatDirectory>
   );
 }
 

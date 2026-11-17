@@ -44,6 +44,7 @@ async def test_character_list_shows_name_intro_avatar_colour_and_background_but_
             "signature_url": "/api/characters/mano/signature",
             "stand": None,  # no stand assets URL is configured
             "idol_id": 1,
+            "can_join_group": True,
             "short_name": None,  # none configured
             "name_zh": None,  # none configured
             "name_kana": None,
@@ -68,6 +69,7 @@ async def test_character_list_shows_name_intro_avatar_colour_and_background_but_
             "signature_url": None,
             "stand": None,
             "idol_id": None,
+            "can_join_group": True,
             "short_name": None,
             "name_zh": None,  # none configured
             "name_kana": None,

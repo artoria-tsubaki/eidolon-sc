@@ -19,6 +19,7 @@ describe("在不在导航外壳里", () => {
     "/conversations",
     "/conversation/mano",
     "/conversation/mano?x=1",
+    "/group-chat/123",
     "/moments",
     "/settings",
     "/settings?tab=own-keys",
@@ -60,9 +61,17 @@ describe("在不在导航外壳里", () => {
   });
 });
 
+it("群聊沿用对话导航，现有单聊通话还在外壳里", () => {
+  expect(currentNavItem("/group-chat/123")).toBe("conversations");
+  expect(navDestination("conversations", "/group-chat/123")).toBe("/conversations");
+  expect(departure("/group-chat/123", "mano")).toBe("keep");
+  expect(showsShellCallBar("/group-chat/123", "mano")).toBe(true);
+});
+
 describe("是不是她的对话页（信不在上面弹）", () => {
   it("她的对话页是，别的页面不是", () => {
     expect(isConversationPage("/conversation/mano")).toBe(true);
+  expect(isConversationPage("/group-chat/123")).toBe(true);
     expect(isConversationPage("/conversations")).toBe(false);
   });
 });

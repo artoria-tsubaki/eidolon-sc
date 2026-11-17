@@ -53,7 +53,7 @@ import logging
 import sqlite3
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -171,6 +171,7 @@ class _Generating:
     once it has (its picture, or why there is none), and whether it is settled (`settled`):
     kept as it came out, or dropped."""
 
+    finish: Callable[[str, bytes | None, PhotoFailure | None], Awaitable[bool]]
     recorded: bool = False
     dropped: bool = False
     outcome: tuple[bytes | None, PhotoFailure | None] | None = None
@@ -271,13 +272,14 @@ class Photos:
         return Eligibility()
 
     def begin(
-        self, character: Character, tag: str, user_id: str, own: ImageSettings | None = None
+        self, character: Character, tag: str, user_id: str, own: ImageSettings | None = None,
+        *, finish: Callable[[str, bytes | None, PhotoFailure | None], Awaitable[bool]] | None = None,
     ) -> str:
         """Begin the photo her `tag` says, for the user, generating on their `own` image
         generation if the turn brings it, else on the deployer's, in the turn it is begun
         in; its id."""
         photo_id = uuid.uuid4().hex
-        self._generating[photo_id] = _Generating()
+        self._generating[photo_id] = _Generating(finish or self._store.finish_photo)
         until = asyncio.get_running_loop().time() + TIME_LIMIT
         task = asyncio.create_task(
             self._generate(photo_id, character, tag, user_id, own, until, recording())
@@ -478,7 +480,7 @@ class Photos:
         self, photo_id: str, image: bytes | None, reason: PhotoFailure | None
     ) -> None:
         try:
-            if not await self._store.finish_photo(photo_id, image, reason):
+            if not await self._generating[photo_id].finish(photo_id, image, reason):
                 log.info("photo %s came out after its reply was deleted; not kept", photo_id)
         finally:  # kept, or failed to be: none waits on it for good
             self._forget(photo_id)

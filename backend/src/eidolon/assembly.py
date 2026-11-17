@@ -90,6 +90,7 @@ from eidolon.rerank import (
     thresholds_for,
 )
 from eidolon.retrieval import Retrieval, open_reference_sources
+from eidolon.group_chats import GroupChats
 from eidolon.schedule import Schedules, idols_of
 from eidolon.service_clients import ProviderClients, ServiceClients
 from eidolon.service_status import ServiceStatus, probes
@@ -137,6 +138,7 @@ class Backend:
     own_keys: OwnKeys
     read_aloud: ReadAloud
     """Reads her words aloud as users ask (GLOSSARY.md「朗读」)."""
+    group_chats: GroupChats
     admissions: Admissions
     """Lets text turns and calls begin, and settles them."""
     accounts: Accounts
@@ -467,14 +469,17 @@ def build(
         RecentMoments(database, clock, lambda: config.moments.enabled),
         HerWeather(weathers, config.qweather),
     )
+    affinity_judge = config.affinity_judge()
     engine = ConversationEngine(
         database, store, characters, gift_catalog, memories, titles, clock, her_now, retrieval,
-        lambda: config.history_turns, world, affinities, config.affinity_judge(), photos,
+        lambda: config.history_turns, world, affinities, affinity_judge, photos,
         happenings,
     )
     admissions = Admissions(
         usage, activity, own_keys, cooldown_until=affinities.cooldown_until
     )
+    group_chats = GroupChats(database, characters, world, admissions, memories, retrieval,
+                             clock, lambda: config.history_turns, photos, affinity_judge, affinities)
     closers.append(admissions.aclose)  # closed after the calls, which may leave some to settle
     # The bar looks in her facts with the text turns' own, if they have them, needing no
     # judge model.
@@ -522,6 +527,7 @@ def build(
         own_keys=own_keys,
         read_aloud=read_aloud,
         admissions=admissions,
+        group_chats=group_chats,
         accounts=Accounts(
             store, clock, memories, calls, invites, lambda: config.registration,
             settings.admins, settings.secret_key,
@@ -539,7 +545,8 @@ def build(
         backups=backups,
         photos=photos,
         service_status=service_status,
-        data_packages=DataPackages(database, store, memories, characters, gift_catalog, clock),
+        data_packages=DataPackages(database, store, memories, characters, gift_catalog, clock,
+                                   group_chats.can_join),
         reach_outs=reach_outs,
         letters=letters,
         moments=moments,

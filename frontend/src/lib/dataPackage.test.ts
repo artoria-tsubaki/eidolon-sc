@@ -106,6 +106,12 @@ describe("导入结果的一句话", () => {
     expect(importSummary({ ...nothing, conversations: 1, letters: 2 })).toBe("导入了 1 段对话、2 封信。");
   });
 
+  it("报告导入的群聊和因成员不可用跳过的群聊", () => {
+    expect(importSummary({ ...nothing, group_chats: 2, group_chats_skipped: 1 })).toBe(
+      "导入了 2 个群聊。因成员不可用，跳过了 1 个群聊。",
+    );
+  });
+
   it("什么也没新加时照实说", () => {
     expect(importSummary(nothing)).toBe("没有新的内容要导入。");
   });
