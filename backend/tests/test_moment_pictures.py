@@ -463,8 +463,11 @@ async def test_only_the_user_whose_moment_it_is_reads_its_picture(
 ):
     image = FakeImageService()
     client, _ = await posted(make_client, image, pictured(STREET))
-    friend = make_client(FakeLLM(), user="friend")
-    signed_out = make_client(FakeLLM(), user=None)
+    # The same clock as the moment: a client on the wall clock signs in "now" and deletes
+    # every session expired by then, including this one once the test date is 30 days past.
+    clock = backend_of(client).clock
+    friend = make_client(FakeLLM(), user="friend", clock=clock)
+    signed_out = make_client(FakeLLM(), user=None, clock=clock)
 
     [moment] = await timeline(client)
     path = moment["image"]
