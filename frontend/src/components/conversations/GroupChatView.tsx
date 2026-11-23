@@ -28,6 +28,7 @@ import {
 } from "@/lib/groupChat";
 
 import { useDirectory, useWide } from "./ConversationDirectory";
+import { BackgroundDetails } from "./GroupBackground";
 import { GroupAvatars, useGroupDirectory } from "./GroupChatDirectory";
 import { PhotoBlock } from "./PhotoBlock";
 
@@ -200,7 +201,10 @@ export function GroupChatView({ id, userId }: { id: string; userId: string }) {
           </Button>
         )}
         <GroupAvatars memberIds={group.member_ids} characters={byId} />
-        <h1 className="min-w-0 flex-1 truncate text-header">{group.name}</h1>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-header">{group.name}</h1>
+          {group.background && <BackgroundDetails value={group.background} memberName={memberName} />}
+        </div>
         <AlertDialog open={deleteOpen} onOpenChange={(open) => { if (!deleting) setDeleteOpen(open); }}>
           <AlertDialogTrigger render={<Button size="icon" variant="ghost" aria-label={t.delete} disabled={busy} />}>
             <Trash2Icon />

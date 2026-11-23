@@ -47,7 +47,8 @@ from eidolon.letter_prompt import Occasion, Paragraph, Written
 from eidolon.letters import Carried as CarriedLetter
 from eidolon.letters import add_carried as add_carried_letters
 from eidolon.letters import read_carried as read_carried_letters
-from eidolon.group_chats import GroupTurn, add_packaged_group, group_photo_image, packaged_groups
+from eidolon.group_background import GroupBackground
+from eidolon.group_chats import GroupName, GroupTurn, add_packaged_group, group_photo_image, packaged_groups
 from eidolon.memory import (
     MAX_MEMORY_LENGTH,
     CarriedMemory,
@@ -83,11 +84,12 @@ from eidolon.store import (
     write_profile,
 )
 
-FORMAT = 9
+FORMAT = 11
 """The newest format this version reads, and the one it exports. Changing the format adds
 one to it, and keeps reading the older ones: 2 added her reach-outs (`reach_outs`), 3 her
 being unwell among the events (`unwell`) and the periods the user wrote down (`cycles`), 4
-the producer's city in the profile (`city`), 5 letters, 6 user images, 7 group chats, 8 multiple mentions and group photos."""
+the producer's city in the profile (`city`), 5 letters, 6 user images, 7 group chats, 8 multiple mentions and group photos,
+9 quoted group replies, 10 group backgrounds, and 11 group names."""
 
 REACH_OUTS_SINCE = 2
 """The format whose conversations first held her reach-outs: before it, none may."""
@@ -629,6 +631,8 @@ class PackagedLetter(_Strict):
 
 
 class PackagedGroup(_Strict):
+    name: GroupName | None = None
+    background: GroupBackground | None = None
     members: list[str] = Field(min_length=2, max_length=3)
     created_at: Time
     turns: list[GroupTurn]
@@ -638,6 +642,8 @@ class PackagedGroup(_Strict):
     def _valid_turns(self) -> "PackagedGroup":
         if len(set(self.members)) != len(self.members):
             raise ValueError("repeated group member")
+        if self.background:
+            self.background = self.background.for_members(self.members)
         messages: set[str] = set()
         replies_seen: set[str] = set()
         photo_attachments: set[str] = set()
@@ -679,11 +685,12 @@ class PackagedGroup(_Strict):
 
 def _packaged_group(
     members: list[str], created_at: str, turns: list[GroupTurn], photos: Mapping[str, KeptPhoto],
+    background: GroupBackground | None, name: str | None,
 ) -> PackagedGroup:
     for turn in turns:
         for message in turn.messages:
             message.photo = None
-    return PackagedGroup(members=members, created_at=created_at, turns=turns,
+    return PackagedGroup(name=name, background=background, members=members, created_at=created_at, turns=turns,
                          photos={id: PackagedPhoto.of(photo) for id, photo in photos.items()})
 
 
@@ -894,7 +901,7 @@ class DataPackages:
             self._memories.read_kept(db, user_id) if "memories" in categories else [],
             cycle_records.read_carried(db, user_id) if "cycles" in categories else [],
             read_carried_letters(db, user_id) if "letters" in categories else [],
-            [_packaged_group(m, at, t, photos) for m, at, t, photos in
+            [_packaged_group(*group) for group in
              packaged_groups(db, user_id, "photos" in categories)] if "conversations" in categories else [],
         )
 
@@ -1148,7 +1155,7 @@ def _write_import(
     for group in unpacked.group_chats:
         if add_packaged_group(db, user_id, group.members, group.created_at, group.turns,
                               {id: photo.kept() for id, photo in group.photos.items()},
-                              unpacked.pictures.__getitem__):
+                              unpacked.pictures.__getitem__, group.background, group.name):
             imported.group_chats += 1
             imported.photos += len(sent(list(group.photos.values())))
     if unpacked.memories:
@@ -1221,6 +1228,10 @@ def _read(zipped: zipfile.ZipFile) -> tuple[Manifest, PackageData, dict[str, byt
             for group in data.group_chats or []
         ):
             raise BrokenPackage("extended group chat before format 8")
+        if manifest.format < 11 and any(group.name for group in data.group_chats or []):
+            raise BrokenPackage("group name before format 11")
+        if manifest.format < 10 and any(group.background for group in data.group_chats or []):
+            raise BrokenPackage("group background before format 10")
         if manifest.format < 9 and any(
             message.reply_to for group in data.group_chats or [] for turn in group.turns for message in turn.messages
         ):

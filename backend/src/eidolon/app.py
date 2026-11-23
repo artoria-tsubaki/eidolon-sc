@@ -74,7 +74,9 @@ from eidolon.cycles_api import add_cycle_routes
 from eidolon.letters_api import add_letter_routes
 from eidolon.moments_api import add_moment_routes
 from eidolon.gifts_api import add_gift_routes
+from eidolon.group_background import GroupBackground
 from eidolon.group_chats import (
+    GroupName,
     BadGroup, GroupBusy, GroupDetail, GroupMissing, GroupSummary, GroupTurn, RequestConflict,
 )
 from eidolon.invites_api import add_invite_routes
@@ -154,6 +156,8 @@ class TurnInput(BaseModel):
 
 
 class NewGroupChat(BaseModel):
+    name: GroupName | None = None
+    background: GroupBackground | None = None
     member_ids: list[str] = Field(min_length=2, max_length=3)
 
 
@@ -923,7 +927,7 @@ def create_app(backend: Backend) -> FastAPI:
 
     @app.post("/api/group-chats", status_code=201)
     async def create_group(body: NewGroupChat, user_id: UserId) -> GroupSummary:
-        return await groups.create(user_id, body.member_ids)
+        return await groups.create(user_id, body.member_ids, body.background, body.name)
 
     @app.get("/api/group-chats/{group_id}")
     async def group_detail(group_id: str, user_id: UserId) -> GroupDetail:

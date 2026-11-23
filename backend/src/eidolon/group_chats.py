@@ -8,14 +8,14 @@ import sqlite3
 import unicodedata
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from anyio import CancelScope
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from eidolon.activity import Result
 from eidolon.admission import Admission, Admissions, CoolingDown
@@ -27,6 +27,8 @@ from eidolon.characters import Character
 from eidolon.clock import Clock
 from eidolon.data_access import Database
 from eidolon.delivery_cues import without_cues
+from eidolon.group_background import GroupBackground
+from eidolon.her_now import HerNow
 from eidolon.llm import ChatLLM, ChatMessage
 from eidolon.memory import Memories
 from eidolon.own_keys import BroughtKeys, OwnKeyFailed, TurnKeys
@@ -48,6 +50,8 @@ CREATE TABLE IF NOT EXISTS group_chats (
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     member_key TEXT NOT NULL,
+    background TEXT,
+    name TEXT,
     UNIQUE (user_id, member_key, created_at)
 );
 CREATE TABLE IF NOT EXISTS group_chat_members (
@@ -150,7 +154,11 @@ class GroupTurn(BaseModel):
         return [self.mentioned_id] if self.mentioned_id else []
 
 
+GroupName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 class GroupSummary(BaseModel):
+    background: GroupBackground | None = None
     id: str
     member_ids: list[str]
     name: str
@@ -176,6 +184,11 @@ def _key(members: Sequence[str]) -> str:
 
 def _create_tables(db: sqlite3.Connection) -> None:
     db.executescript(_SCHEMA)
+    group_columns = {row[1] for row in db.execute("PRAGMA table_info(group_chats)")}
+    if "name" not in group_columns:
+        db.execute("ALTER TABLE group_chats ADD COLUMN name TEXT")
+    if "background" not in group_columns:
+        db.execute("ALTER TABLE group_chats ADD COLUMN background TEXT")
     columns = {row[1] for row in db.execute("PRAGMA table_info(group_chat_turns)")}
     if "mentioned_ids" not in columns:
         db.execute("ALTER TABLE group_chat_turns ADD COLUMN mentioned_ids TEXT")
@@ -192,13 +205,14 @@ def _prepare(db: sqlite3.Connection) -> None:
 
 
 def _insert_group(
-    db: sqlite3.Connection, user: str, members: Sequence[str], created_at: str
+    db: sqlite3.Connection, user: str, members: Sequence[str], created_at: str, background: GroupBackground | None,
+    name: str | None,
 ) -> str | None:
     group = uuid4().hex
     created = db.execute(
-        "INSERT INTO group_chats VALUES (?,?,?,?)"
+        "INSERT INTO group_chats(id,user_id,created_at,member_key,background,name) VALUES (?,?,?,?,?,?)"
         " ON CONFLICT(user_id,member_key,created_at) DO NOTHING",
-        (group, user, created_at, _key(members)),
+        (group, user, created_at, _key(members), background.model_dump_json() if background else None, name),
     )
     if not created.rowcount:
         return None
@@ -279,11 +293,11 @@ def _members(db: sqlite3.Connection, group: str) -> list[str]:
     )]
 
 
-def _owned(db: sqlite3.Connection, user: str, group: str) -> str:
-    row = db.execute("SELECT created_at FROM group_chats WHERE id=? AND user_id=?", (group, user)).fetchone()
+def _owned(db: sqlite3.Connection, user: str, group: str) -> tuple[str, str | None, str | None]:
+    row = db.execute("SELECT created_at,background,name FROM group_chats WHERE id=? AND user_id=?", (group, user)).fetchone()
     if row is None:
         raise GroupMissing()
-    return row[0]
+    return row[0], row[1], row[2]
 
 
 def _last(db: sqlite3.Connection, group: str) -> GroupMessage | None:
@@ -296,11 +310,12 @@ def _last(db: sqlite3.Connection, group: str) -> GroupMessage | None:
 
 def packaged_groups(
     db: sqlite3.Connection, user: str, with_photos: bool,
-) -> list[tuple[list[str], str, list[GroupTurn], dict[str, KeptPhoto]]]:
+) -> list[tuple[list[str], str, list[GroupTurn], dict[str, KeptPhoto], GroupBackground | None, str | None]]:
     return [
-        (_members(db, group), at, _turns(db, group), _packaged_photos(db, group) if with_photos else {})
-        for group, at in db.execute(
-            "SELECT id,created_at FROM group_chats WHERE user_id=? ORDER BY created_at,id", (user,)
+        (_members(db, group), at, _turns(db, group), _packaged_photos(db, group) if with_photos else {},
+         GroupBackground.model_validate_json(raw) if raw else None, name)
+        for group, at, raw, name in db.execute(
+            "SELECT id,created_at,background,name FROM group_chats WHERE user_id=? ORDER BY created_at,id", (user,)
         )
     ]
 
@@ -318,9 +333,10 @@ def _packaged_photos(db: sqlite3.Connection, group: str) -> dict[str, KeptPhoto]
 
 def add_packaged_group(
     db: sqlite3.Connection, user: str, members: list[str], at: str, turns: Sequence[GroupTurn],
-    photos: Mapping[str, KeptPhoto], picture_of: Callable[[str], bytes],
+    photos: Mapping[str, KeptPhoto], picture_of: Callable[[str], bytes], background: GroupBackground | None,
+    name: str | None,
 ) -> bool:
-    if (group := _insert_group(db, user, members, at)) is None:
+    if (group := _insert_group(db, user, members, at, background, name)) is None:
         return False
     ids = {message.id: uuid4().hex for turn in turns for message in turn.messages}
     for turn in turns:
@@ -492,9 +508,10 @@ class GroupChats:
         self, db: Database, characters: dict[str, Character], world: World | None,
         admissions: Admissions, memories: Memories, retrieval: Retrieval | None, clock: Clock,
         history_turns: Callable[[], int | None], photos: Photos,
-        photo_judge: AffinityJudge | None, affinities: Affinities,
+        photo_judge: AffinityJudge | None, affinities: Affinities, her_now: HerNow,
     ) -> None:
         self._db = db
+        self._her_now = her_now
         self._characters = characters
         self._world = world
         self._admissions = admissions
@@ -520,40 +537,51 @@ class GroupChats:
         character = self._characters.get(id)
         return (character.short_name or character.name) if character else id
 
-    def _summary(self, db: sqlite3.Connection, group: str, at: str) -> GroupSummary:
+    def _summary(self, db: sqlite3.Connection, group: str, at: str, background: GroupBackground | None,
+                 name: str | None) -> GroupSummary:
         members = _members(db, group)
-        return GroupSummary(id=group, member_ids=members, created_at=at,
-                            name="、".join(map(self._name, members)), last_message=_last(db, group))
+        return GroupSummary(background=background, id=group, member_ids=members, created_at=at,
+                            name=name or "、".join(map(self._name, members)), last_message=_last(db, group))
 
     async def summaries(self, user: str) -> list[GroupSummary]:
         def read(db: sqlite3.Connection) -> list[GroupSummary]:
-            groups = [self._summary(db, group, at) for group, at in db.execute(
-                "SELECT id,created_at FROM group_chats WHERE user_id=? ORDER BY id", (user,),
+            groups = [self._summary(db, group, at, GroupBackground.model_validate_json(raw) if raw else None, name)
+                      for group, at, raw, name in db.execute(
+                "SELECT id,created_at,background,name FROM group_chats WHERE user_id=? ORDER BY id", (user,),
             )]
             return sorted(groups, key=lambda g: (
                 g.last_message.created_at if g.last_message else g.created_at
             ), reverse=True)
         return await self._db.read(read)
 
-    async def create(self, user: str, members: list[str]) -> GroupSummary:
+    async def create(self, user: str, members: list[str], background: GroupBackground | None = None,
+                     name: str | None = None) -> GroupSummary:
         if not 2 <= len(members) <= 3 or len(set(members)) != len(members):
             raise BadGroup("请选择 2 至 3 位不同的偶像。")
         if not all(map(self.can_join, members)):
             raise BadGroup("群聊成员必须是可选的偶像。")
+        try:
+            background = background.for_members(members) if background else None
+        except ValueError as error:
+            raise BadGroup(str(error)) from error
+
+        saved_name = name if name is not None else "、".join(self._characters[id].name for id in members)
+
         def write(db: sqlite3.Connection) -> GroupSummary:
             at = self._clock()
             # Frozen test clocks and simultaneous creations can share a timestamp.
             while True:
                 stamped = at.astimezone(UTC).isoformat(timespec="microseconds")
-                if group := _insert_group(db, user, members, stamped):
-                    return self._summary(db, group, stamped)
+                if group := _insert_group(db, user, members, stamped, background, saved_name):
+                    return self._summary(db, group, stamped, background, saved_name)
                 at += datetime.resolution
         return await self._db.write(write)
 
     async def read(self, user: str, group: str) -> GroupDetail:
         def read(db: sqlite3.Connection) -> GroupDetail:
-            at = _owned(db, user, group)
-            return GroupDetail(**self._summary(db, group, at).model_dump(), turns=_turns(db, group))
+            at, raw, name = _owned(db, user, group)
+            background = GroupBackground.model_validate_json(raw) if raw else None
+            return GroupDetail(**self._summary(db, group, at, background, name).model_dump(), turns=_turns(db, group))
         return await self._db.read(read)
 
     async def delete(self, user: str, group: str) -> None:
@@ -576,7 +604,8 @@ class GroupChats:
         brought: BroughtKeys, device_timezone: str | None,
         reply_to: str | None = None,
     ) -> GroupTurn | GroupRun:
-        await self._db.read(_owned, user, group)
+        _, raw, _ = await self._db.read(_owned, user, group)
+        background = GroupBackground.model_validate_json(raw) if raw else None
         members = await self._db.read(_members, group)
         if len(set(mentions)) != len(mentions) or any(m not in members for m in mentions):
             raise BadGroup("点名名单只能包含不同的本群成员。")
@@ -626,7 +655,7 @@ class GroupChats:
                 await admission.settle("left")
                 raise
             return self._run(user, group, turn, request, members, available, message, targets, admission,
-                             device_timezone, addressed, brought.image, quoted)
+                             device_timezone, addressed, brought.image, quoted, background)
         except BaseException:
             self._busy.discard(group)
             self._requests.discard(key)
@@ -638,7 +667,7 @@ class GroupChats:
         self, user: str, group: str, turn: int, request: str, members: list[str], available: list[str],
         message: GroupMessage, targets: list[str], admission: Admission[TurnKeys],
         device_timezone: str | None, addressed: list[tuple[list[str], str]], own_image: ImageSettings | None,
-        quoted: GroupMessage | None,
+        quoted: GroupMessage | None, background: GroupBackground | None,
     ) -> GroupRun:
         status: Status = "interrupted"
         result: Result = "left"
@@ -694,7 +723,7 @@ class GroupChats:
                         parser = ReplyParser()
                         tag = None
                         try:
-                            prompt = await self._prompt(user, speaker, members, context, device_timezone, targets,
+                            prompt = await self._prompt(user, speaker, members, context, device_timezone, targets, background,
                                                         photo.turn if photo else None)
                             async with aclosing(_reply_text(admission.llms.chat, prompt)) as chunks:
                                 async for part in chunks:
@@ -902,15 +931,24 @@ class GroupChats:
 
     async def _prompt(
         self, user: str, speaker: str, members: list[str], history: list[GroupMessage],
-        device_timezone: str | None, targets: list[str], photo: PhotoTurn | None,
+        device_timezone: str | None, targets: list[str], background: GroupBackground | None, photo: PhotoTurn | None,
     ) -> list[ChatMessage]:
         character = self._characters[speaker]
+        known = await self._her_now.read(user, speaker, device_timezone, "group")
         profile = await self._db.read(read_profile, user)
         affinity = (await self._db.read(self._affinities.read_status, user, speaker)
                     if self._affinities.on else None)
         timezone = effective_timezone(profile, device_timezone)
+        now = self._clock()
+        if background:
+            if background.time:
+                now = background.time.instant()
+                timezone = background.time.timezone
+            if background.time or background.place or speaker in background.members:
+                known = replace(known, her_jobs=None, done_today=None)
+        current = self._her_now.lines(known, "group", now, timezone, profile, None, ())
         world = (
-            self._world.prompt(character.name, local_date(self._clock(), timezone)) if self._world else None
+            self._world.prompt(character.name, local_date(now, timezone)) if self._world else None
         )
         retrieved = []
         if self._retrieval is not None:
@@ -927,6 +965,17 @@ class GroupChats:
                         "可以接制作人的话，也可以接刚才被点名成员的回复。避免重复他们的回答。")
         else:
             guidance = "用一两句回应制作人或接前面成员的话，给群聊带来一点不同内容。"
+        scene = {}
+        if background:
+            current.append("以下开场背景是本群的叙事资料。按成员姓名区分位置，前情与日程冲突时以前情为准，随之后的对话自然推进。")
+            scene = {"开场背景": {
+                "共同地点": background.place,
+                "前情": background.premise,
+                "成员设定": [
+                    {"成员": self._speaker_name(key), "地点": value.place, "活动": value.activity}
+                    for key, value in background.members.items()
+                ],
+            }}
         return [
             ChatMessage("system", "\n\n".join([
                 *always_known(character, world), format_instructions(None),
@@ -941,8 +990,9 @@ class GroupChats:
                 "对话中只有 photo_status 为 ready 的照片已经发出。不要猜照片里有什么。",
             ]), cache_breakpoint=True),
             ChatMessage("system", producer_prompt(profile)),
-            ChatMessage("system", "\n\n".join([photo.prompt if photo else CANNOT_SEND, *retrieved])),
+            ChatMessage("system", "\n\n".join([*current, photo.prompt if photo else CANNOT_SEND, *retrieved])),
             ChatMessage("user", json.dumps({
+                **scene,
                 "mentioned": [self._speaker_name(id) for id in targets],
                 "messages": self._transcript(history),
             }, ensure_ascii=False)),

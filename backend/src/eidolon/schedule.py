@@ -500,6 +500,15 @@ class Schedules:
             self._hers(db, user_id, character_id, device_timezone, now, counting, writing)
         )
 
+    async def read_only_hers(
+        self, user_id: str, character_id: str, device_timezone: str | None
+    ) -> HerSchedule | None:
+        if not self._is_on():
+            return None
+        return await self._db.read(
+            self._hers, user_id, character_id, device_timezone, self._clock(), False, False
+        )
+
     async def done_on(self, user_id: str, day: date) -> dict[str, list[DayJob]]:
         """Each character's jobs the user saved that are done on `day` in Tokyo, where they
         are as their profile has it, done already or not yet, in the order they are done;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { applyGroupEvent, createGroup, sendGroupTurn, type GroupLog, type GroupMessage } from "@/lib/groupChat";
+import { applyGroupEvent, createGroup, emptyBackground, presetTime, sendGroupTurn, type GroupLog, type GroupMessage } from "@/lib/groupChat";
 
 const sent: GroupMessage = {
   id: "sent", character_id: null, text: "今天聊什么？", segments: [], created_at: "2026-11-17T09:00:00Z",
@@ -13,14 +13,28 @@ const answer: GroupMessage = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("群聊", () => {
+  it("时间预设按选中的时区取当天，创建时发送最终编辑值", async () => {
+    const now = new Date("2026-11-23T17:30:00Z");
+    const local = presetTime(21, "Asia/Tokyo", now);
+    expect(local).toBe("2026-11-24T21:00");
+    expect(presetTime(9, "America/New_York", now)).toBe("2026-11-23T09:00");
+    const fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("localStorage", { getItem: () => null });
+    const background = { ...emptyBackground(), time: { local, timezone: "Asia/Tokyo" }, place: "后台走廊" };
+    await createGroup(["mano", "kogane"], " 排练群 ", background);
+    expect(JSON.parse(fetch.mock.calls[0][1].body).name).toBe("排练群");
+    expect(JSON.parse(fetch.mock.calls[0][1].body).background).toEqual(background);
+  });
+
   it("建群按选择顺序发角色 ID，发消息用结构化点名和请求 ID", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: "group" }), { status: 201 }))
       .mockResolvedValueOnce(new Response('data: {"type":"done","turn_id":1,"status":"done","detail":null}\n\n'));
     vi.stubGlobal("fetch", fetch);
     vi.stubGlobal("localStorage", { getItem: () => null });
-    expect(await createGroup(["kogane", "mano"])).toEqual({ id: "group" });
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ member_ids: ["kogane", "mano"] });
+    expect(await createGroup(["kogane", "mano"], "恋鐘、真乃")).toEqual({ id: "group" });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ member_ids: ["kogane", "mano"], name: "恋鐘、真乃" });
     const events = [];
     for await (const event of sendGroupTurn("group", "user", "在吗", ["mano", "kogane"], "request-12345678", new AbortController().signal)) {
       events.push(event);

@@ -71,17 +71,20 @@ STILL_HERSELF = (
 """How she stays herself all the same."""
 
 
-def cycle_lines(today: HerDay) -> list[str]:
+IN_GROUP = "这是公开群聊，哪怕被直接问起也不确认周期阶段或透露私下细节。"
+
+
+def cycle_lines(today: HerDay, *, public: bool = False) -> list[str]:
     """What she is told of where her cycle has her, after the rest of what she is told of
     now: how she feels by the day, then how she keeps it to herself; nothing in her other
     days. The same under 18 or not; never in what her photos are prompted with. Worded as
     `prototype/cycles-voice` settled it."""
     if isinstance(today, Period):
         feeling = PERIOD_EARLY if today.day <= 2 else PERIOD_LATE
-        return [feeling, UNSAID + ASKED_IN_PERIOD + STILL_HERSELF]
+        return [feeling, UNSAID + (IN_GROUP if public else ASKED_IN_PERIOD) + STILL_HERSELF]
     if isinstance(today, Premenstrual):
         feeling = PREMENSTRUAL_NEAR if today.days_left <= 2 else PREMENSTRUAL_FAR
-        return [feeling, UNSAID + ASKED_BEFORE + STILL_HERSELF]
+        return [feeling, UNSAID + (IN_GROUP if public else ASKED_BEFORE) + STILL_HERSELF]
     return []
 
 
