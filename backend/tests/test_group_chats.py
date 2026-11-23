@@ -21,7 +21,7 @@ from tests.fakes import (
 )
 from tests.test_affinity import keep
 from tests.test_own_llm import LLM as OWN_LLM
-from tests.test_data_package import export, import_package, other_deployment, unzipped
+from tests.test_data_package import export, import_package, other_deployment, package_of, unzipped
 from tests.test_photos import IMAGE, REPLY as PHOTO_REPLY, asking, settled
 from tests.test_rate_limit import limited, post_turn
 from tests.test_retrieval import PARK_LINE, embedder  # noqa: F401 - fixture
@@ -438,11 +438,13 @@ async def test_group_data_package_round_trip_and_account_deletion(
     make_client: ClientFactory, settings: Settings, tmp_path: Path,
 ):
     client = make_client(FakeLLM(KOGANE, MANO))
-    group = await create(client)
+    background = {"place": "后台休息室", "premise": "刚散场"}
+    created = await client.post("/api/group-chats", json={"member_ids": MEMBERS, "name": "  后台组  ", "background": background})
+    group = created.json()["id"]
     await events(client, group, body("kogane"))
     package = await export(client, "conversations")
     _, manifest, data = unzipped(package)
-    assert manifest["format"] == 9 and manifest["counts"]["conversations"] == 1
+    assert manifest["format"] == 11 and manifest["counts"]["conversations"] == 1
     assert data["group_chats"][0]["members"] == MEMBERS
 
     other = other_deployment(make_client, settings, tmp_path)
@@ -451,11 +453,22 @@ async def test_group_data_package_round_trip_and_account_deletion(
     assert imported.json()["group_chats"] == 1
     imported_group = (await other.get("/api/group-chats")).json()[0]["id"]
     assert imported_group != group
-    restored = (await detail(other, imported_group))["turns"][0]
+    restored_group = await detail(other, imported_group)
+    assert restored_group["name"] == created.json()["name"] == "后台组"
+    assert restored_group["background"] == created.json()["background"]
+    restored = restored_group["turns"][0]
     assert [m["character_id"] for m in restored["messages"]] == [None, "kogane", "mano"]
     assert restored["messages"][1]["segments"] == [{"ja": "よかよ！", "zh": "好呀！"}]
     again = await import_package(other, package, "conversations")
     assert again.status_code == 200 and not again.json().get("group_chats")
+    # Format 9 has the same group records without the opening background.
+    del data["group_chats"][0]["name"]
+    del data["group_chats"][0]["background"]
+    legacy = other_deployment(make_client, settings, tmp_path, user="legacy")
+    old = await import_package(legacy, package_of({**manifest, "format": 9}, data), "conversations")
+    assert old.status_code == 200 and old.json()["group_chats"] == 1
+    assert (await legacy.get("/api/group-chats")).json()[0]["background"] is None
+
     missing_path = tmp_path / "missing-characters"
     missing_path.mkdir()
     config = missing_path / "characters.toml"
@@ -477,3 +490,13 @@ async def test_group_data_package_round_trip_and_account_deletion(
     with sqlite3.connect(settings.database_path) as db:
         for table in ("group_chats", "group_chat_members", "group_chat_turns", "group_chat_messages"):
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+
+
+async def test_new_group_name_defaults_to_ordered_names_and_rejects_blanks(make_client: ClientFactory):
+    client = make_client(FakeLLM())
+    group = await create(client, ["kogane", "mano"])
+    assert (await detail(client, group))["name"] == "月岡恋鐘、櫻木真乃"
+    invalid = await client.post("/api/group-chats", json={"member_ids": MEMBERS, "name": "  "})
+    assert invalid.status_code == 422
+    groups = (await client.get("/api/group-chats")).json()
+    assert [(item["id"], item["name"]) for item in groups] == [(group, "月岡恋鐘、櫻木真乃")]

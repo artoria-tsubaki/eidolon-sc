@@ -13,7 +13,7 @@ export const CATEGORIES = ["conversations", "photos", "memories", "profile", "cy
 export type Category = (typeof CATEGORIES)[number];
 
 /** 这一版能读的最新格式，和后端 `data_package.FORMAT` 一样。 */
-export const FORMAT = 9;
+export const FORMAT = 11;
 
 const MANIFEST = "manifest.json";
 

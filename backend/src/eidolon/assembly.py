@@ -479,7 +479,7 @@ def build(
         usage, activity, own_keys, cooldown_until=affinities.cooldown_until
     )
     group_chats = GroupChats(database, characters, world, admissions, memories, retrieval,
-                             clock, lambda: config.history_turns, photos, affinity_judge, affinities)
+                             clock, lambda: config.history_turns, photos, affinity_judge, affinities, her_now)
     closers.append(admissions.aclose)  # closed after the calls, which may leave some to settle
     # The bar looks in her facts with the text turns' own, if they have them, needing no
     # judge model.

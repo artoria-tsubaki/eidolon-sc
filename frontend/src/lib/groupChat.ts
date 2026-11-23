@@ -19,7 +19,27 @@ export type GroupTurn = {
   mentioned_ids?: string[] | null;
   messages: GroupMessage[];
 };
+export type MemberSetting = { place: string; activity: string };
+export type GroupBackground = {
+  time: { local: string; timezone: string } | null;
+  place: string;
+  members: Record<string, MemberSetting>;
+  premise: string;
+};
+
+export function emptyBackground(): GroupBackground {
+  return { time: null, place: "", members: {}, premise: "" };
+}
+
+export function presetTime(hour: number, timezone: string, now = new Date()): string {
+  const date = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(now);
+  return date + "T" + String(hour).padStart(2, "0") + ":00";
+}
+
 export type GroupSummary = {
+  background?: GroupBackground | null;
   id: string;
   member_ids: string[];
   name: string;
@@ -93,11 +113,11 @@ export async function listGroups(signal?: AbortSignal): Promise<GroupSummary[]> 
   return json(await api(resource, { signal }));
 }
 
-export async function createGroup(memberIds: string[]): Promise<GroupSummary> {
+export async function createGroup(memberIds: string[], name: string, background?: GroupBackground): Promise<GroupSummary> {
   return json(await api(resource, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ member_ids: memberIds }),
+    body: JSON.stringify({ member_ids: memberIds, name: name.trim(), background }),
   }));
 }
 

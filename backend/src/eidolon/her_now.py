@@ -1,5 +1,5 @@
 """What she knows of now (GLOSSARY.md「此刻」), each time she speaks, whatever the occasion:
-typing, in a call, reaching out (GLOSSARY.md「搭话」), visiting the bar (GLOSSARY.md「光顾」),
+typing, in a group, in a call, reaching out (GLOSSARY.md「搭话」), visiting the bar (GLOSSARY.md「光顾」),
 posting a moment (GLOSSARY.md「朋友圈」).
 
 `HerNow` gives it in two steps. The first reads: her jobs, counting those done, so that her
@@ -32,7 +32,7 @@ from eidolon.weather import Weather
 from eidolon.world import World
 
 Occasion = Talking | Literal["visit", "moments"]
-"""Where she speaks: typing, in a call, reaching out (`apart`), visiting the bar, or posting
+"""Where she speaks: typing, in a group, in a call, reaching out (`apart`), visiting the bar, or posting
 a moment."""
 
 
@@ -56,6 +56,10 @@ class Carries:
 
 
 CARRIES: dict[Occasion, Carries] = {
+    "group": Carries(
+        time=True, today=True, schedule=True, cycle=True, affinity=False, moments=False,
+        weather=False,
+    ),
     "typing": Carries(
         time=True, today=True, schedule=True, cycle=True, affinity=True, moments=True,
         weather=True,
@@ -146,10 +150,10 @@ class HerNow:
         affinity, her cycle where the occasion tells her of it, her job done today, her latest
         moments where it tells her of them, and for a visit her affinity. Whoever reads her
         affinity otherwise is to read it after this, so that it has her jobs done counted."""
-        her_jobs = (
-            await self._schedules.hers(user_id, character_id, device_timezone)
-            if self._schedules is not None else None
-        )
+        her_jobs = None
+        if self._schedules is not None:
+            read_jobs = self._schedules.read_only_hers if occasion == "group" else self._schedules.hers
+            her_jobs = await read_jobs(user_id, character_id, device_timezone)
         her_days = (
             await self._cycles.her_days(user_id, character_id)
             if CARRIES[occasion].cycle and self._cycles is not None else always_neither
@@ -206,5 +210,5 @@ class HerNow:
         if carries.schedule and known.her_jobs is not None:
             lines += schedule_lines(known.her_jobs)
         if carries.cycle:
-            lines += cycle_lines(known.her_days(now, timezone))
+            lines += cycle_lines(known.her_days(now, timezone), public=occasion == "group")
         return lines
